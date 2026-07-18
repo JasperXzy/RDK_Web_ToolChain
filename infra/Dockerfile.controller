@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DEFAULT_TIMEOUT=120
+
+WORKDIR /app
+
+COPY pyproject.toml /app/pyproject.toml
+COPY requirements/controller.txt /app/requirements/controller.txt
+
+RUN python -m pip install --no-cache-dir --retries 5 -r requirements/controller.txt
+
+COPY docs/README.md /app/docs/README.md
+COPY packages/contracts /app/packages/contracts
+COPY services/controller /app/services/controller
+COPY runner /app/runner
+COPY profiles /app/profiles
+
+RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation .
+
+EXPOSE 8080
+CMD ["rdkwt-controller"]

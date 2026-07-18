@@ -1,0 +1,24 @@
+schema_version: "1"
+profile_id: "s600-oe-3.7.0"
+display_name: "S600"
+toolchain_adapter: "openexplorer-3.7.0"
+platform: "s600"
+march: "nash-p"
+operator_catalog: "j6p"
+capabilities:
+  core_num:
+    allowed: [1, 2]
+    default: 1
+  max_l2m_size:
+    mode: "optional"
+    supports_auto: true
+    minimum_bytes: 0
+    maximum_bytes: 25165824
+    default: 0
+  compile_mode:
+    allowed: ["latency", "bandwidth", "balance"]
+    default: "latency"
+  optimize_level:
+    allowed: ["O0", "O1", "O2"]
+    default: "O2"
+

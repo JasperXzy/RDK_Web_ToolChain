@@ -6,6 +6,7 @@
 
 - [产品需求文档（PRD）](./PRD.md)：定义产品目标、用户流程、功能范围、优先级、非功能要求和验收标准。
 - [项目设计文档](./PROJECT_DESIGN.md)：定义本地部署架构、Docker 调度方式、组件职责、数据模型、API、任务协议、安全边界、测试和实施方案。
+- [ADR-011](./adr/ADR-011-runner-runtime-boundary.md)：记录 M0 Runner 运行时、Named Volume 与受限容器 Spike 结论。
 
 ## 已确认的核心决策
 
@@ -25,4 +26,3 @@
 - [模型量化与编译](../references/oe-doc-3.7.0-s100-s600/guide/ptq/ptq_usage/quantize_compile.html)
 - [hb_compile 配置说明](../references/oe-doc-3.7.0-s100-s600/guide/ptq/ptq_tool/hb_compile/convert.html)
 - [hrt_model_exec](../references/oe-doc-3.7.0-s100-s600/guide/ucp/runtime/tool_introduction/hrt_model_exec.html)
-

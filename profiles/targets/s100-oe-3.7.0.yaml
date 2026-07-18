@@ -1,0 +1,22 @@
+schema_version: "1"
+profile_id: "s100-oe-3.7.0"
+display_name: "S100"
+toolchain_adapter: "openexplorer-3.7.0"
+platform: "s100"
+march: "nash-e"
+operator_catalog: "j6em"
+capabilities:
+  core_num:
+    allowed: [1]
+    default: 1
+  max_l2m_size:
+    mode: "disabled"
+    allowed: [0]
+    default: 0
+  compile_mode:
+    allowed: ["latency", "bandwidth", "balance"]
+    default: "latency"
+  optimize_level:
+    allowed: ["O0", "O1", "O2"]
+    default: "O2"
+

@@ -2179,8 +2179,14 @@ docker compose up -d
 
 ## 33. 仍需通过 Spike 验证的技术点
 
-1. 官方 CPU/GPU 镜像内运行固定 Runner 所需的 Python 版本和依赖。
-2. 工具链在 `network=none`、capability drop 和只读 Assets 下的兼容性。
+M0 合约探针已经验证 Runner 的 Python 3.10 运行时、Named Volume 写入边界、固定
+entrypoint，以及受限容器中的基础工具调用；结论见
+[ADR-011：OpenExplorer Runner 运行时与存储边界](./adr/ADR-011-runner-runtime-boundary.md)。
+真实 `hb_compile check/compile` 尚未执行，因此下列涉及真实模型与产物的项目仍保留。
+
+1. CPU 镜像已验证为 Python 3.10.12；GPU 镜像的 Runner 依赖仍待验证。
+2. 基础 Probe 已通过 `network=none`、capability drop 和只读 Assets；真实
+   `hb_compile check/compile` 仍待验证。
 3. GPU Runner 所需的共享内存和 DeviceRequest 参数。
 4. `hb_compile` 收到 SIGTERM 后的退出行为及中间文件完整性。
 5. OpenExplorer 3.7.0 各产物实际命名和结构化字段稳定性。
@@ -2218,4 +2224,3 @@ Spike 结果应更新本设计并形成 ADR，而不是只保存在临时脚本�
 - [Protect the Docker daemon socket](https://docs.docker.com/engine/security/protect-access/)
 - [Docker Volumes](https://docs.docker.com/engine/storage/volumes/)
 - [Docker Compose GPU Support](https://docs.docker.com/compose/how-tos/gpu-support/)
-

@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rdk-webtoolchain"
+version = "0.1.0.dev0"
+description = "Local-first controlled OpenExplorer model conversion workbench"
+readme = "docs/README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "alembic>=1.14,<2",
+  "docker>=7.1,<8",
+  "fastapi>=0.115,<1",
+  "jsonschema>=4.23,<5",
+  "pydantic>=2.10,<3",
+  "PyYAML>=6.0,<7",
+  "sqlalchemy>=2.0,<3",
+  "uvicorn>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<8",
+  "ruff>=0.11,<1",
+]
+
+[project.scripts]
+rdkwt-controller = "rdkwt_controller.main:run"
+rdkwt-runner = "rdkwt_runner.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["services/controller", "packages/contracts", "runner"]
+include = ["rdkwt_controller*", "rdkwt_contracts*", "rdkwt_runner*"]
+
+[tool.setuptools.package-data]
+rdkwt_contracts = ["schemas/*.json"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+pythonpath = ["services/controller", "packages/contracts", "runner"]
+markers = [
+  "docker: requires access to a local Docker Engine",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"runner/**/*.py" = ["UP017"]

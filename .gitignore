@@ -1,1 +1,8 @@
+.coverage
+.pytest_cache/
+.rdkwt/
+.venv/
+__pycache__/
+*.egg-info/
+dist/
 references/

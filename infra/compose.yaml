@@ -1,0 +1,36 @@
+services:
+  controller:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.controller
+    image: rdk-webtoolchain/controller:0.1-dev
+    container_name: rdkwt-controller
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${RDKWT_PORT:-8080}:8080"
+    group_add:
+      - "${DOCKER_GID}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - rdkwt-state:/state
+      - rdkwt-assets:/assets
+      - rdkwt-runs:/runs
+    environment:
+      RDKWT_BIND_HOST: "0.0.0.0"
+      RDKWT_PORT: "8080"
+      RDKWT_STATE_DIR: /state
+      RDKWT_ASSETS_DIR: /assets
+      RDKWT_RUNS_DIR: /runs
+      RDKWT_PROFILE_DIR: /app/profiles/targets
+      RDKWT_ASSETS_VOLUME: rdkwt-assets
+      RDKWT_RUNS_VOLUME: rdkwt-runs
+      RDKWT_CPU_RUNNER_IMAGE: rdk-webtoolchain/oe-runner-cpu:oe3.7.0-app0.1
+
+volumes:
+  rdkwt-state:
+    name: rdkwt-state
+  rdkwt-assets:
+    name: rdkwt-assets
+  rdkwt-runs:
+    name: rdkwt-runs
+

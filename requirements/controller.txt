@@ -1,0 +1,11 @@
+setuptools>=75
+wheel
+alembic>=1.14,<2
+docker>=7.1,<8
+fastapi>=0.115,<1
+jsonschema>=4.23,<5
+pydantic>=2.10,<3
+PyYAML>=6.0,<7
+sqlalchemy>=2.0,<3
+uvicorn>=0.34,<1
+

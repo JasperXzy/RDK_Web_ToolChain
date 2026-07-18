@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://d-robotics.local/rdkwt/contracts/1.0/event.schema.json",
+  "title": "RDK WebToolChain Runner Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sequence", "timestamp", "level", "step", "type", "code", "message"],
+  "properties": {
+    "sequence": {"type": "integer", "minimum": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "level": {"enum": ["debug", "info", "warning", "error"]},
+    "step": {
+      "enum": ["runner", "inspect", "check", "preprocess", "compile", "verify", "collect"]
+    },
+    "type": {
+      "enum": [
+        "runner_started",
+        "step_started",
+        "progress",
+        "step_completed",
+        "step_skipped",
+        "cancel_requested",
+        "runner_completed",
+        "error"
+      ]
+    },
+    "progress": {"type": "integer", "minimum": 0, "maximum": 100},
+    "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
+    "message": {"type": "string", "maxLength": 4096}
+  }
+}
+

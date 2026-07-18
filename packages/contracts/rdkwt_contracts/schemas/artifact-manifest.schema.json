@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://d-robotics.local/rdkwt/contracts/1.0/artifact-manifest.schema.json",
+  "title": "RDK WebToolChain Artifact Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "artifacts"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "relative_path",
+          "size_bytes",
+          "sha256",
+          "mime_type",
+          "required"
+        ],
+        "properties": {
+          "kind": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+          "relative_path": {
+            "type": "string",
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+          },
+          "size_bytes": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "mime_type": {"type": "string", "minLength": 1},
+          "required": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}
+
