@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -36,12 +37,20 @@ class ResolvedRunnerImage:
 class DockerGateway:
     def __init__(self, client: Any, settings: Settings) -> None:
         self._client = client
+        self._client_lock = threading.Lock()
         self._settings = settings
         self._validate_deployment_boundary()
 
     @classmethod
     def from_env(cls, settings: Settings) -> DockerGateway:
-        return cls(docker.from_env(), settings)
+        return cls(None, settings)
+
+    def _docker(self) -> Any:
+        if self._client is None:
+            with self._client_lock:
+                if self._client is None:
+                    self._client = docker.from_env()
+        return self._client
 
     def _validate_deployment_boundary(self) -> None:
         for name in (self._settings.assets_volume, self._settings.runs_volume):
@@ -51,10 +60,10 @@ class DockerGateway:
             raise ValueError("assets and runs must use different Docker volumes")
 
     def ping(self) -> bool:
-        return bool(self._client.ping())
+        return bool(self._docker().ping())
 
     def resolve_cpu_image(self) -> ResolvedRunnerImage:
-        image = self._client.images.get(self._settings.cpu_runner_image)
+        image = self._docker().images.get(self._settings.cpu_runner_image)
         immutable_id = str(image.id)
         if not immutable_id.startswith("sha256:"):
             raise ManagedContainerError("Docker did not return an immutable image ID")
@@ -67,8 +76,9 @@ class DockerGateway:
 
     def preflight(self) -> dict[str, Any]:
         self.ping()
-        version = self._client.version()
-        info = self._client.info()
+        client = self._docker()
+        version = client.version()
+        info = client.info()
         image = self.resolve_cpu_image()
         return {
             "docker": {
@@ -135,7 +145,7 @@ class DockerGateway:
     def create_attempt(self, *, run_id: str, attempt: int) -> Container:
         image = self.resolve_cpu_image()
         options = self.container_create_kwargs(run_id=run_id, attempt=attempt, image=image)
-        return self._client.containers.create(**options)
+        return self._docker().containers.create(**options)
 
     @staticmethod
     def start(container: Container) -> None:
@@ -159,13 +169,13 @@ class DockerGateway:
         container.remove(force=False, v=True)
 
     def managed_containers(self) -> list[Container]:
-        return self._client.containers.list(
+        return self._docker().containers.list(
             all=True,
             filters={"label": f"{MANAGED_LABEL}=true"},
         )
 
     def _verified_container(self, container_id: str, *, run_id: str, attempt: int) -> Container:
-        container = self._client.containers.get(container_id)
+        container = self._docker().containers.get(container_id)
         container.reload()
         labels = container.attrs.get("Config", {}).get("Labels", {}) or {}
         expected = {

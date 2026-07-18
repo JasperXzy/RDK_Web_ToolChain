@@ -17,6 +17,14 @@ def _positive_int(name: str, default: int) -> int:
     return value
 
 
+def _allowed_hosts() -> tuple[str, ...]:
+    raw = os.environ.get("RDKWT_ALLOWED_HOSTS", "127.0.0.1,localhost,[::1]")
+    hosts = tuple(item.strip() for item in raw.split(",") if item.strip())
+    if not hosts:
+        raise ValueError("RDKWT_ALLOWED_HOSTS must contain at least one host")
+    return hosts
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     state_dir: Path
@@ -34,6 +42,8 @@ class Settings:
     runner_nano_cpus: int = 4_000_000_000
     runner_pids_limit: int = 512
     stop_timeout_seconds: int = 15
+    max_upload_bytes: int = 2 * 1024 * 1024 * 1024
+    allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost", "[::1]")
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -59,11 +69,37 @@ class Settings:
             runner_nano_cpus=_positive_int("RDKWT_RUNNER_NANO_CPUS", 4_000_000_000),
             runner_pids_limit=_positive_int("RDKWT_RUNNER_PIDS_LIMIT", 512),
             stop_timeout_seconds=_positive_int("RDKWT_STOP_TIMEOUT_SECONDS", 15),
+            max_upload_bytes=_positive_int(
+                "RDKWT_MAX_UPLOAD_BYTES", 2 * 1024 * 1024 * 1024
+            ),
+            allowed_hosts=_allowed_hosts(),
         )
 
     @property
     def database_url(self) -> str:
         return f"sqlite+pysqlite:///{self.state_dir / 'db' / 'rdkwt.sqlite3'}"
+
+    @property
+    def alembic_config_path(self) -> Path:
+        configured = os.environ.get("RDKWT_ALEMBIC_CONFIG")
+        if configured is not None:
+            path = Path(configured)
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"configured Alembic file does not exist: {configured}"
+                )
+            return path
+        candidates = [
+            Path(__file__).resolve().parents[1] / "alembic.ini",
+            Path.cwd() / "services" / "controller" / "alembic.ini",
+            _project_root() / "services" / "controller" / "alembic.ini",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        raise FileNotFoundError(
+            "Alembic configuration was not found; set RDKWT_ALEMBIC_CONFIG"
+        )
 
     def ensure_directories(self) -> None:
         for path in (self.state_dir / "db", self.assets_dir, self.runs_dir):

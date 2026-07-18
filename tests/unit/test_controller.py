@@ -1,13 +1,49 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import uuid
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 from rdkwt_controller.api.routes import ConversionRunRequest
+from rdkwt_controller.application import CatalogError
 from rdkwt_controller.main import create_app
+
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+async def _chunks(payload: bytes):
+    yield payload
+
+
+async def _prepare_catalog(app):
+    service = app.state.services.catalog_service
+    project = service.create_project(name="ResNet18", description="M2 test")
+    model = await service.upload_model(
+        project_id=project["id"],
+        filename="resnet18.onnx",
+        model_name="ResNet18",
+        content_length=5,
+        chunks=_chunks(b"onnx\x00"),
+    )
+    calibration_set = service.create_calibration_set(
+        project_id=project["id"], name="ImageNet", description=""
+    )
+    calibration_version_id = calibration_set["versions"][0]["id"]
+    for index in range(20):
+        await service.upload_calibration_sample(
+            version_id=calibration_version_id,
+            filename=f"sample-{index:02d}.png",
+            content_length=len(PNG_1X1),
+            chunks=_chunks(PNG_1X1),
+        )
+    calibration = service.finalize_calibration_version(calibration_version_id)
+    return project, model, calibration
 
 
 class FakeImage:
@@ -44,13 +80,17 @@ def test_health_profiles_and_preflight(settings) -> None:
             transport=ASGITransport(app=app), base_url="http://testserver"
         ) as client:
             return await asyncio.gather(
+                client.get("/"),
                 client.get("/api/v1/health"),
                 client.get("/api/v1/profiles"),
                 client.get("/api/v1/system/preflight"),
             )
 
-    health, profiles, preflight = asyncio.run(exercise_app())
+    index, health, profiles, preflight = asyncio.run(exercise_app())
 
+    assert index.status_code == 200
+    assert "项目与资产" in index.text
+    assert "frame-ancestors 'none'" in index.headers["content-security-policy"]
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
     assert {item["platform"] for item in profiles.json()} == {"s100", "s600"}
@@ -65,9 +105,12 @@ def test_probe_rejects_missing_asset_before_docker(settings) -> None:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://testserver"
         ) as client:
+            session = await client.get("/api/v1/session")
+            assert session.headers["cache-control"] == "no-store"
             return await client.post(
                 "/api/v1/system/runner-probes",
                 json={"profile_id": "s100-oe-3.7.0", "asset_path": "missing.onnx"},
+                headers={"X-RDKWT-CSRF": session.json()["csrf_token"]},
             )
 
     response = asyncio.run(exercise_app())
@@ -75,24 +118,20 @@ def test_probe_rejects_missing_asset_before_docker(settings) -> None:
 
 
 def test_conversion_submission_writes_normalized_s600_request(settings) -> None:
-    model = settings.assets_dir / "models" / "resnet18.onnx"
-    calibration = settings.assets_dir / "calibration" / "imagenet"
-    model.parent.mkdir(parents=True)
-    calibration.mkdir(parents=True)
-    model.write_bytes(b"model-placeholder")
     app = create_app(settings, docker_client=FakeDockerClient())
+    project, model, calibration = asyncio.run(_prepare_catalog(app))
 
     submission = app.state.services.run_service.submit_conversion(
         profile_id="s600-oe-3.7.0",
-        model_path="models/resnet18.onnx",
-        calibration_path="calibration/imagenet",
+        model_version_id=model["id"],
+        calibration_version_id=calibration["id"],
         output_prefix="resnet18_s600",
         core_num=2,
         max_l2m_size="auto",
         compile_mode="latency",
         balance_factor=None,
         optimize_level="O2",
-        sample_limit=100,
+        sample_limit=20,
         jobs=8,
     )
     request_path = (
@@ -108,28 +147,36 @@ def test_conversion_submission_writes_normalized_s600_request(settings) -> None:
     assert request["configuration"]["target_profile"]["profile"]["march"] == "nash-p"
     assert request["configuration"]["compiler"]["core_num"] == 2
     assert request["configuration"]["compiler"]["max_l2m_size"] == "auto"
+    assert request["paths"]["model"].startswith("blobs/sha256/")
+    assert request["paths"]["calibration_source"].endswith("/source")
+    detail = app.state.services.repository.get(submission.run_id)
+    assert detail["project_id"] == project["id"]
+    assert detail["model_version_id"] == model["id"]
+    assert detail["calibration_version_id"] == calibration["id"]
+    preview = app.state.services.catalog_service.project_deletion_preview(project["id"])
+    assert preview["can_delete"] is False
+    with pytest.raises(CatalogError, match="conversion history"):
+        app.state.services.catalog_service.delete_project(
+            project["id"], confirmation=project["id"]
+        )
 
 
 def test_conversion_submission_rejects_s100_dual_core(settings) -> None:
-    model = settings.assets_dir / "models" / "resnet18.onnx"
-    calibration = settings.assets_dir / "calibration" / "imagenet"
-    model.parent.mkdir(parents=True)
-    calibration.mkdir(parents=True)
-    model.write_bytes(b"model-placeholder")
     app = create_app(settings, docker_client=FakeDockerClient())
+    _project, model, calibration = asyncio.run(_prepare_catalog(app))
 
     with pytest.raises(ValueError, match="core_num"):
         app.state.services.run_service.submit_conversion(
             profile_id="s100-oe-3.7.0",
-            model_path="models/resnet18.onnx",
-            calibration_path="calibration/imagenet",
+            model_version_id=model["id"],
+            calibration_version_id=calibration["id"],
             output_prefix="resnet18_s100",
             core_num=2,
             max_l2m_size=0,
             compile_mode="latency",
             balance_factor=None,
             optimize_level="O2",
-            sample_limit=100,
+            sample_limit=20,
             jobs=8,
         )
 
@@ -139,8 +186,178 @@ def test_conversion_request_rejects_boolean_integer_fields() -> None:
         ConversionRunRequest.model_validate(
             {
                 "profile_id": "s100-oe-3.7.0",
-                "model_path": "models/resnet18.onnx",
-                "calibration_path": "calibration/imagenet",
+                "model_version_id": str(uuid.uuid4()),
+                "calibration_version_id": str(uuid.uuid4()),
                 "core_num": True,
             }
         )
+
+
+def test_project_mutations_require_csrf_and_catalog_upload_deduplicates(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+
+    async def exercise_app():
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            rejected = await client.post("/api/v1/projects", json={"name": "Blocked"})
+            session = (await client.get("/api/v1/session")).json()
+            headers = {"X-RDKWT-CSRF": session["csrf_token"]}
+            wrong_origin = await client.post(
+                "/api/v1/projects",
+                json={"name": "Blocked origin"},
+                headers={**headers, "Origin": "https://example.invalid"},
+            )
+            project = await client.post(
+                "/api/v1/projects", json={"name": "Catalog"}, headers=headers
+            )
+            project_id = project.json()["id"]
+            upload_headers = {
+                **headers,
+                "X-Filename": "resnet18.onnx",
+                "X-Model-Name": "ResNet18",
+                "Content-Type": "application/octet-stream",
+            }
+            first = await client.post(
+                f"/api/v1/projects/{project_id}/models",
+                content=b"same-onnx-content",
+                headers=upload_headers,
+            )
+            second = await client.post(
+                f"/api/v1/projects/{project_id}/models",
+                content=b"same-onnx-content",
+                headers={**upload_headers, "X-Model-Name": "ResNet18 copy"},
+            )
+            return rejected, wrong_origin, project, first, second
+
+    rejected, wrong_origin, project, first, second = asyncio.run(exercise_app())
+
+    assert rejected.status_code == 403
+    assert rejected.json()["code"] == "CSRF_TOKEN_INVALID"
+    assert wrong_origin.status_code == 403
+    assert wrong_origin.json()["code"] == "ORIGIN_NOT_ALLOWED"
+    assert project.status_code == 201
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["storage_reused"] is False
+    assert second.json()["storage_reused"] is True
+    assert first.json()["asset"]["id"] == second.json()["asset"]["id"]
+    assert len(list((settings.assets_dir / "blobs" / "sha256").glob("*/*"))) == 1
+
+
+def test_calibration_finalize_writes_immutable_manifest(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    _project, _model, calibration = asyncio.run(_prepare_catalog(app))
+
+    manifest_path = (
+        settings.assets_dir / "calibration-sets" / calibration["id"] / "manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text())
+    source_files = list(manifest_path.parent.joinpath("source").iterdir())
+
+    assert calibration["status"] == "READY"
+    assert calibration["sample_count"] == 20
+    assert len(source_files) == 20
+    assert manifest["manifest_sha256"] == calibration["manifest_sha256"]
+    assert manifest["validation_report"]["duplicate_content_count"] == 19
+    with pytest.raises(CatalogError, match="already finalized"):
+        app.state.services.catalog_service.finalize_calibration_version(calibration["id"])
+
+
+def test_calibration_finalize_rolls_back_materialization_on_metadata_failure(
+    settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    service = app.state.services.catalog_service
+    project = service.create_project(name="Rollback", description="")
+    calibration_set = service.create_calibration_set(
+        project_id=project["id"], name="Rollback set", description=""
+    )
+    version_id = calibration_set["versions"][0]["id"]
+    asyncio.run(
+        service.upload_calibration_sample(
+            version_id=version_id,
+            filename="sample.png",
+            content_length=len(PNG_1X1),
+            chunks=_chunks(PNG_1X1),
+        )
+    )
+
+    def fail_metadata_update(*_args, **_kwargs):
+        raise RuntimeError("simulated metadata failure")
+
+    monkeypatch.setattr(
+        service.repository, "finalize_calibration_version", fail_metadata_update
+    )
+
+    with pytest.raises(RuntimeError, match="simulated metadata failure"):
+        service.finalize_calibration_version(version_id)
+
+    assert not (settings.assets_dir / "calibration-sets" / version_id).exists()
+    assert service.get_calibration_version(version_id)["status"] == "DRAFT"
+
+
+def test_project_delete_requires_confirmation_and_preserves_shared_blob(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    service = app.state.services.catalog_service
+    first_project = service.create_project(name="First", description="")
+    second_project = service.create_project(name="Second", description="")
+
+    async def upload_both():
+        first = await service.upload_model(
+            project_id=first_project["id"],
+            filename="shared.onnx",
+            model_name="Shared",
+            content_length=6,
+            chunks=_chunks(b"shared"),
+        )
+        second = await service.upload_model(
+            project_id=second_project["id"],
+            filename="shared.onnx",
+            model_name="Shared",
+            content_length=6,
+            chunks=_chunks(b"shared"),
+        )
+        return first, second
+
+    first, second = asyncio.run(upload_both())
+    blob = next((settings.assets_dir / "blobs" / "sha256").glob("*/*"))
+
+    assert first["asset"]["id"] == second["asset"]["id"]
+    with pytest.raises(CatalogError, match="must exactly match"):
+        service.delete_project(first_project["id"], confirmation="wrong")
+    service.delete_project(first_project["id"], confirmation=first_project["id"])
+    assert blob.is_file()
+    service.delete_project(second_project["id"], confirmation=second_project["id"])
+    assert not blob.exists()
+
+
+def test_conversion_rechecks_catalog_content_before_submission(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    _project, model, calibration = asyncio.run(_prepare_catalog(app))
+
+    def submit():
+        return app.state.services.run_service.submit_conversion(
+            profile_id="s100-oe-3.7.0",
+            model_version_id=model["id"],
+            calibration_version_id=calibration["id"],
+            output_prefix="integrity_check",
+            core_num=1,
+            max_l2m_size=0,
+            compile_mode="latency",
+            balance_factor=None,
+            optimize_level="O2",
+            sample_limit=20,
+            jobs=8,
+        )
+
+    model_blob = next((settings.assets_dir / "blobs" / "sha256").glob("*/*.onnx"))
+    model_blob.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="model asset hash"):
+        submit()
+
+    model_blob.write_bytes(b"onnx\x00")
+    calibration_source = settings.assets_dir / "calibration-sets" / calibration["id"] / "source"
+    (calibration_source / "unexpected.png").write_bytes(PNG_1X1)
+    with pytest.raises(ValueError, match="file list"):
+        submit()

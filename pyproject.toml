@@ -37,6 +37,7 @@ include = ["rdkwt_controller*", "rdkwt_contracts*", "rdkwt_runner*"]
 
 [tool.setuptools.package-data]
 rdkwt_contracts = ["schemas/*.json"]
+rdkwt_controller = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>RDK WebToolChain</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="RDK WebToolChain 首页">
+      <span class="brand-mark" aria-hidden="true">R</span>
+      <span><strong>RDK</strong><small>WebToolChain</small></span>
+    </a>
+    <div class="topbar-actions">
+      <span id="system-status" class="status-pill neutral"><span></span>正在检查环境</span>
+      <a class="quiet-link" href="/docs">API 文档 ↗</a>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="sidebar-heading">
+        <div><span class="eyebrow">Workspace</span><h2>项目</h2></div>
+        <button id="toggle-create-project" class="icon-button" type="button" title="新建项目">＋</button>
+      </div>
+      <form id="create-project-form" class="compact-form hidden">
+        <label>项目名称<input id="project-name" maxlength="200" required placeholder="例如：ResNet18 基线"></label>
+        <label>备注<textarea id="project-description" maxlength="4000" rows="2" placeholder="用途、数据来源或负责人"></textarea></label>
+        <div class="form-actions"><button class="button primary small" type="submit">创建</button><button id="cancel-create-project" class="button ghost small" type="button">取消</button></div>
+      </form>
+      <nav id="project-list" class="project-list" aria-label="项目列表"></nav>
+      <div id="project-empty" class="sidebar-empty">还没有项目。创建一个项目开始管理模型和校准数据。</div>
+    </aside>
+
+    <main class="workspace">
+      <section id="welcome" class="welcome-panel">
+        <div class="welcome-copy">
+          <span class="eyebrow accent">M2 · P0 Web 产品</span>
+          <h1><span>把模型转换变成一条</span><span>可追溯的本地工作流。</span></h1>
+          <p>创建项目，上传 ONNX 与真实校准图片。系统会对内容计算 SHA-256、复用重复存储，并只把受控资源 ID 交给转换任务。</p>
+          <button id="welcome-create" class="button primary" type="button">创建第一个项目</button>
+        </div>
+        <div class="flow-card" aria-label="工作流概览">
+          <div class="flow-step active"><b>01</b><span>项目与资产<small>上传、哈希、版本</small></span></div>
+          <div class="flow-line"></div>
+          <div class="flow-step"><b>02</b><span>平台配置<small>S100 / S600</small></span></div>
+          <div class="flow-line"></div>
+          <div class="flow-step"><b>03</b><span>隔离转换<small>日志、产物、指标</small></span></div>
+        </div>
+      </section>
+
+      <section id="project-workspace" class="hidden">
+        <div class="project-header">
+          <div><span class="eyebrow">Current project</span><h1 id="current-project-name"></h1><p id="current-project-description"></p><button id="delete-project" class="danger-link" type="button">删除项目</button></div>
+          <div class="project-metrics">
+            <div><strong id="metric-models">0</strong><span>模型</span></div>
+            <div><strong id="metric-calibrations">0</strong><span>校准集</span></div>
+            <div><strong id="metric-storage">0 B</strong><span>资产占用</span></div>
+          </div>
+        </div>
+
+        <div class="section-grid">
+          <section class="panel">
+            <div class="panel-heading"><div><span class="step-label">01 · MODEL</span><h2>ONNX 模型</h2></div><span class="hint">最大 <span id="upload-limit">—</span></span></div>
+            <form id="model-upload-form" class="upload-form">
+              <label class="drop-zone" for="model-file"><span class="upload-icon">↑</span><strong>选择 ONNX 文件</strong><small id="model-file-label">文件保留原名用于展示，内部使用内容哈希</small><input id="model-file" type="file" accept=".onnx" required></label>
+              <label>模型名称<input id="model-name" maxlength="200" placeholder="默认使用文件名"></label>
+              <div class="progress hidden" id="model-progress"><span></span></div>
+              <button class="button primary" type="submit">上传并登记模型</button>
+            </form>
+            <div id="model-list" class="asset-list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading"><div><span class="step-label">02 · CALIBRATION</span><h2>图片校准集</h2></div><span class="hint">推荐 20–100 张</span></div>
+            <form id="calibration-create-form" class="inline-create">
+              <input id="calibration-name" maxlength="200" required placeholder="校准集名称">
+              <button class="button secondary" type="submit">新建草稿</button>
+            </form>
+            <label>校准版本<select id="calibration-version-select"><option value="">先创建校准集</option></select></label>
+            <form id="sample-upload-form" class="upload-form compact">
+              <label class="drop-zone small" for="sample-files"><span class="upload-icon">＋</span><strong>选择 JPEG / PNG / BMP</strong><small id="sample-file-label">可一次选择多张，按选择顺序登记</small><input id="sample-files" type="file" accept=".jpg,.jpeg,.png,.bmp" multiple required></label>
+              <div class="progress hidden" id="sample-progress"><span></span></div>
+              <div class="split-actions"><button class="button secondary" type="submit">上传样本</button><button id="finalize-calibration" class="button ghost" type="button">定稿版本</button></div>
+            </form>
+            <div id="calibration-list" class="asset-list"></div>
+          </section>
+        </div>
+
+        <section class="panel conversion-panel">
+          <div class="panel-heading"><div><span class="step-label">03 · CONVERT</span><h2>创建转换任务</h2></div><span class="status-pill neutral">OpenExplorer 3.7.0</span></div>
+          <form id="conversion-form" class="conversion-form">
+            <label>模型版本<select id="conversion-model" required><option value="">选择模型</option></select></label>
+            <label>校准版本<select id="conversion-calibration" required><option value="">选择已定稿版本</option></select></label>
+            <label>目标平台<select id="conversion-profile" required></select></label>
+            <label>输出前缀<input id="output-prefix" value="resnet18_224x224_nv12" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" required></label>
+            <button class="button primary" type="submit">提交隔离转换</button>
+          </form>
+          <p class="form-note">S100 自动锁定单核与 L2M=0；S600 默认双核并自动分配 L2M。任务提交后配置和资源版本不可变。</p>
+        </section>
+
+        <section class="panel runs-panel">
+          <div class="panel-heading"><div><span class="step-label">ACTIVITY</span><h2>最近任务</h2></div><button id="refresh-runs" class="button ghost small" type="button">刷新</button></div>
+          <div id="run-list" class="run-list"><div class="empty-state">暂无转换任务</div></div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

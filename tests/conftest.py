@@ -17,6 +17,7 @@ def settings(tmp_path: Path) -> Settings:
         assets_volume="rdkwt-test-assets",
         runs_volume="rdkwt-test-runs",
         cpu_runner_image="rdk-webtoolchain/oe-runner-cpu:oe3.7.0-app0.1",
+        allowed_hosts=("testserver",),
     )
     configured.ensure_directories()
     return configured

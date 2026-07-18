@@ -31,8 +31,11 @@ def _container_http_json(
     script = (
         "import base64,json,urllib.request;"
         f"data=base64.b64decode('{encoded_payload}') if '{encoded_payload}' else None;"
+        f"csrf=json.loads(urllib.request.urlopen('http://127.0.0.1:8080/api/v1/session').read())"
+        f"['csrf_token'] if '{method}' != 'GET' else '';"
         f"request=urllib.request.Request('http://127.0.0.1:8080{path}',data=data,method='{method}');"
         "request.add_header('Content-Type','application/json');"
+        "request.add_header('X-RDKWT-CSRF',csrf) if csrf else None;"
         "print(urllib.request.urlopen(request,timeout=10).read().decode())"
     )
     exit_code, output = container.exec_run(["python", "-c", script])
@@ -123,6 +126,16 @@ def test_controller_creates_collects_and_cleans_restricted_runner() -> None:
         _wait_for_controller(controller)
         preflight = _container_http_json(controller, "/api/v1/system/preflight")
         assert preflight["available"] is True  # type: ignore[index]
+
+        project = _container_http_json(
+            controller,
+            "/api/v1/projects",
+            method="POST",
+            payload={"name": "Container E2E", "description": "migration and CSRF smoke"},
+        )
+        projects = _container_http_json(controller, "/api/v1/projects")
+        assert project["name"] == "Container E2E"  # type: ignore[index]
+        assert any(item["id"] == project["id"] for item in projects)  # type: ignore[union-attr]
 
         submission = _container_http_json(
             controller,

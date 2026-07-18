@@ -114,6 +114,12 @@ def test_resnet18_real_calibration_compile_golden(
     loader = None
     runner = None
     try:
+        model_sha256 = hashlib.sha256(model_path.read_bytes()).hexdigest()
+        model_asset_directory = f"/assets/blobs/sha256/{model_sha256[:2]}"
+        model_logical_path = f"blobs/sha256/{model_sha256[:2]}/{model_sha256}.onnx"
+        calibration_version = str(uuid.uuid4())
+        calibration_asset_directory = f"/assets/calibration-sets/{calibration_version}/source"
+        calibration_logical_path = f"calibration-sets/{calibration_version}/source"
         loader = client.containers.run(
             image,
             command=["-c", "import time; time.sleep(900)"],
@@ -130,15 +136,19 @@ def test_resnet18_real_calibration_compile_golden(
                 "python3",
                 "-c",
                 "import pathlib;"
-                "pathlib.Path('/assets/models').mkdir(parents=True);"
-                "pathlib.Path('/assets/calibration/imagenet').mkdir(parents=True);",
+                f"pathlib.Path('{model_asset_directory}').mkdir(parents=True);"
+                f"pathlib.Path('{calibration_asset_directory}').mkdir(parents=True);",
             ]
         )
         assert exit_code == 0, output.decode(errors="replace")
-        _put_files(loader, "/assets/models", [("resnet18.onnx", model_path.read_bytes())])
         _put_files(
             loader,
-            "/assets/calibration/imagenet",
+            model_asset_directory,
+            [(f"{model_sha256}.onnx", model_path.read_bytes())],
+        )
+        _put_files(
+            loader,
+            calibration_asset_directory,
             [(path.name, path.read_bytes()) for path in images],
         )
 
@@ -153,8 +163,8 @@ def test_resnet18_real_calibration_compile_golden(
             "runner_mode": "cpu",
             "pipeline": ["inspect", "check", "preprocess", "compile", "collect"],
             "paths": {
-                "model": "models/resnet18.onnx",
-                "calibration_source": "calibration/imagenet",
+                "model": model_logical_path,
+                "calibration_source": calibration_logical_path,
                 "attempt_root": attempt_root,
             },
             "configuration": _configuration(profile_id, output_prefix),

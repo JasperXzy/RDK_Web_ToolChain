@@ -8,6 +8,7 @@
 - [项目设计文档](./PROJECT_DESIGN.md)：定义本地部署架构、Docker 调度方式、组件职责、数据模型、API、任务协议、安全边界、测试和实施方案。
 - [ADR-011](./adr/ADR-011-runner-runtime-boundary.md)：记录 M0 Runner 运行时、Named Volume 与受限容器 Spike 结论。
 - [ADR-012](./adr/ADR-012-openexplorer-3.7-m1-baseline.md)：记录 M1 ResNet18 S100/S600 真实校准编译基线与 Adapter 决策。
+- [ADR-013](./adr/ADR-013-m2-project-asset-catalog.md)：记录 M2 项目/资产目录、内容寻址存储、校准版本和本地 Web 安全边界。
 
 ## 已确认的核心决策
 

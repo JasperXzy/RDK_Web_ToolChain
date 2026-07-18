@@ -25,6 +25,7 @@ services:
       RDKWT_ASSETS_VOLUME: rdkwt-assets
       RDKWT_RUNS_VOLUME: rdkwt-runs
       RDKWT_CPU_RUNNER_IMAGE: rdk-webtoolchain/oe-runner-cpu:oe3.7.0-app0.1
+      RDKWT_ALEMBIC_CONFIG: /app/services/controller/alembic.ini
 
 volumes:
   rdkwt-state:
@@ -33,4 +34,3 @@ volumes:
     name: rdkwt-assets
   rdkwt-runs:
     name: rdkwt-runs
-

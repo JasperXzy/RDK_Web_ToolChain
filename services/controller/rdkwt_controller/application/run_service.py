@@ -12,7 +12,12 @@ from typing import Any
 
 from rdkwt_contracts import validate_payload
 
-from rdkwt_controller.infrastructure.db import Attempt, ConversionRun, RunRepository
+from rdkwt_controller.infrastructure.db import (
+    Attempt,
+    CatalogRepository,
+    ConversionRun,
+    RunRepository,
+)
 from rdkwt_controller.infrastructure.docker import DockerGateway
 from rdkwt_controller.profiles import ProfileRegistry
 from rdkwt_controller.settings import Settings
@@ -65,6 +70,72 @@ def _atomic_json(path: Path, payload: Any) -> None:
             temporary.unlink()
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_catalog_assets(
+    *,
+    model: Path,
+    expected_model_sha256: str,
+    calibration: Path,
+    manifest_path: Path,
+    expected_manifest_sha256: str,
+) -> None:
+    if _sha256_file(model) != expected_model_sha256:
+        raise ValueError("catalog model asset hash does not match its registered version")
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise ValueError("calibration manifest must be a regular file")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        recorded_digest = manifest.pop("manifest_sha256")
+        encoded = json.dumps(
+            manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ).encode()
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise ValueError(f"calibration manifest is invalid: {exc}") from exc
+    actual_manifest_sha256 = hashlib.sha256(encoded).hexdigest()
+    if (
+        recorded_digest != expected_manifest_sha256
+        or actual_manifest_sha256 != expected_manifest_sha256
+    ):
+        raise ValueError("calibration manifest hash does not match its registered version")
+    samples = manifest.get("samples")
+    if not isinstance(samples, list) or manifest.get("sample_count") != len(samples):
+        raise ValueError("calibration manifest sample count is invalid")
+    expected_files: dict[str, dict[str, Any]] = {}
+    for sample in samples:
+        if not isinstance(sample, dict):
+            raise ValueError("calibration manifest contains an invalid sample")
+        name = sample.get("materialized_name")
+        if (
+            not isinstance(name, str)
+            or not name
+            or "/" in name
+            or "\\" in name
+            or name in expected_files
+        ):
+            raise ValueError("calibration manifest contains an invalid materialized name")
+        expected_files[name] = sample
+    actual_files: dict[str, Path] = {}
+    for path in calibration.iterdir():
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("calibration source contains a non-regular sample")
+        actual_files[path.name] = path
+    if set(actual_files) != set(expected_files):
+        raise ValueError("calibration source file list does not match its frozen manifest")
+    for name, sample in expected_files.items():
+        path = actual_files[name]
+        if path.stat().st_size != sample.get("size_bytes"):
+            raise ValueError(f"calibration sample size changed after finalization: {name}")
+        if _sha256_file(path) != sample.get("sha256"):
+            raise ValueError(f"calibration sample hash changed after finalization: {name}")
+
+
 class RunService:
     def __init__(
         self,
@@ -72,11 +143,13 @@ class RunService:
         settings: Settings,
         profiles: ProfileRegistry,
         repository: RunRepository,
+        catalog_repository: CatalogRepository,
         docker_gateway: DockerGateway,
     ) -> None:
         self._settings = settings
         self._profiles = profiles
         self._repository = repository
+        self._catalog = catalog_repository
         self._docker = docker_gateway
 
     def submit_contract_probe(self, *, profile_id: str, asset_path: str) -> RunSubmission:
@@ -116,14 +189,17 @@ class RunService:
             profile_id=profile.profile_id,
             profile_sha256=profile_snapshot["sha256"],
             request=request,
+            project_id=None,
+            model_version_id=None,
+            calibration_version_id=None,
         )
 
     def submit_conversion(
         self,
         *,
         profile_id: str,
-        model_path: str,
-        calibration_path: str,
+        model_version_id: str,
+        calibration_version_id: str,
         output_prefix: str,
         core_num: int | None,
         max_l2m_size: int | str | None,
@@ -134,17 +210,35 @@ class RunService:
         jobs: int,
     ) -> RunSubmission:
         profile = self._profiles.get(profile_id)
+        inputs = self._catalog.resolve_conversion_inputs(
+            model_version_id=model_version_id,
+            calibration_version_id=calibration_version_id,
+        )
         try:
-            model = _resolve_within(self._settings.assets_dir, model_path, must_exist=True)
+            model = _resolve_within(
+                self._settings.assets_dir, inputs.model_path, must_exist=True
+            )
             calibration = _resolve_within(
-                self._settings.assets_dir, calibration_path, must_exist=True
+                self._settings.assets_dir, inputs.calibration_path, must_exist=True
+            )
+            calibration_manifest = _resolve_within(
+                self._settings.assets_dir,
+                inputs.calibration_manifest_path,
+                must_exist=True,
             )
         except FileNotFoundError as exc:
             raise ValueError("model or calibration asset does not exist") from exc
-        if not model.is_file() or model.suffix.lower() != ".onnx":
-            raise ValueError("model_path must reference a regular ONNX file")
+        if not model.is_file():
+            raise ValueError("catalog model asset must reference a regular file")
         if not calibration.is_dir():
             raise ValueError("calibration_path must reference a directory")
+        _verify_catalog_assets(
+            model=model,
+            expected_model_sha256=inputs.model_sha256,
+            calibration=calibration,
+            manifest_path=calibration_manifest,
+            expected_manifest_sha256=inputs.calibration_manifest_sha256,
+        )
         if not OUTPUT_PREFIX.fullmatch(output_prefix):
             raise ValueError("output_prefix contains unsupported characters")
         if isinstance(sample_limit, bool) or not 20 <= sample_limit <= 100:
@@ -230,8 +324,8 @@ class RunService:
             "runner_mode": "cpu",
             "pipeline": ["inspect", "check", "preprocess", "compile", "collect"],
             "paths": {
-                "model": model_path,
-                "calibration_source": calibration_path,
+                "model": inputs.model_path,
+                "calibration_source": inputs.calibration_path,
                 "attempt_root": attempt_root,
             },
             "configuration": configuration,
@@ -246,6 +340,9 @@ class RunService:
             profile_id=profile.profile_id,
             profile_sha256=profile_snapshot["sha256"],
             request=request,
+            project_id=inputs.project_id,
+            model_version_id=inputs.model_version_id,
+            calibration_version_id=inputs.calibration_version_id,
         )
 
     def _persist_submission(
@@ -256,6 +353,9 @@ class RunService:
         profile_id: str,
         profile_sha256: str,
         request: dict[str, Any],
+        project_id: str | None,
+        model_version_id: str | None,
+        calibration_version_id: str | None,
     ) -> RunSubmission:
         validate_payload("request", request)
         attempt_root = request["paths"]["attempt_root"]
@@ -264,6 +364,9 @@ class RunService:
 
         run = ConversionRun(
             id=run_id,
+            project_id=project_id,
+            model_version_id=model_version_id,
+            calibration_version_id=calibration_version_id,
             profile_id=profile_id,
             profile_sha256=profile_sha256,
             status="QUEUED",

@@ -80,6 +80,9 @@ class RunRepository:
     def _serialize(row: ConversionRun) -> dict[str, Any]:
         return {
             "id": row.id,
+            "project_id": row.project_id,
+            "model_version_id": row.model_version_id,
+            "calibration_version_id": row.calibration_version_id,
             "profile_id": row.profile_id,
             "status": row.status,
             "error": (

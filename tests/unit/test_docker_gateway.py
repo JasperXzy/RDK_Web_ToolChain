@@ -17,6 +17,28 @@ class UnusedClient:
     pass
 
 
+class PingClient:
+    @staticmethod
+    def ping() -> bool:
+        return True
+
+
+def test_environment_client_is_connected_lazily(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        "rdkwt_controller.infrastructure.docker.gateway.docker.from_env",
+        lambda: calls.append("connected") or PingClient(),
+    )
+
+    gateway = DockerGateway.from_env(settings)
+
+    assert calls == []
+    assert gateway.ping() is True
+    assert calls == ["connected"]
+
+
 def test_container_spec_has_fixed_security_boundary(settings: Settings) -> None:
     gateway = DockerGateway(UnusedClient(), settings)
     image = ResolvedRunnerImage(

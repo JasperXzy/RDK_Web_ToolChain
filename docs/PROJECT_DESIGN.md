@@ -1312,7 +1312,9 @@ POST   /api/v1/model-versions/{version_id}/inspect
 DELETE /api/v1/model-versions/{version_id}
 ```
 
-P0 可先实现普通流式 multipart 上传；Chunk API 在模型体积验证后决定是否首期实现。
+M2 第一增量使用原始请求体流式上传，文件名通过 `X-Filename` 或
+`X-Filename-B64` 传递，避免为单文件引入 multipart 临时缓冲。Chunk API 是否进入 P0
+在大模型体积验证后决定。
 
 ### 16.6 Calibration API
 
@@ -1320,6 +1322,8 @@ P0 可先实现普通流式 multipart 上传；Chunk API 在模型体积验证�
 GET  /api/v1/projects/{project_id}/calibration-sets
 POST /api/v1/projects/{project_id}/calibration-sets
 GET  /api/v1/calibration-versions/{version_id}
+POST /api/v1/calibration-versions/{version_id}/samples
+POST /api/v1/calibration-versions/{version_id}/finalize
 POST /api/v1/calibration-versions/{version_id}/validate
 POST /api/v1/preprocess-recipes/preview
 POST /api/v1/preprocess-recipes
@@ -2182,19 +2186,20 @@ docker compose up -d
 M0 合约探针已经验证 Runner 的 Python 3.10 运行时、Named Volume 写入边界、固定
 entrypoint，以及受限容器中的基础工具调用；结论见
 [ADR-011：OpenExplorer Runner 运行时与存储边界](./adr/ADR-011-runner-runtime-boundary.md)。
-真实 `hb_compile check/compile` 尚未执行，因此下列涉及真实模型与产物的项目仍保留。
+M1 已完成 ResNet18 在 S100/S600 上的真实 `hb_compile check/compile`、产物命名解析、
+双 Core 与自动 L2M 验证，结论见
+[ADR-012：OpenExplorer 3.7.0 M1 ResNet18 基线](./adr/ADR-012-openexplorer-3.7-m1-baseline.md)。
+项目/资产目录的第一组 M2 决策见
+[ADR-013：M2 项目与资产目录纵向闭环](./adr/ADR-013-m2-project-asset-catalog.md)。
+当前仍需验证的项目如下。
 
 1. CPU 镜像已验证为 Python 3.10.12；GPU 镜像的 Runner 依赖仍待验证。
-2. 基础 Probe 已通过 `network=none`、capability drop 和只读 Assets；真实
-   `hb_compile check/compile` 仍待验证。
-3. GPU Runner 所需的共享内存和 DeviceRequest 参数。
-4. `hb_compile` 收到 SIGTERM 后的退出行为及中间文件完整性。
-5. OpenExplorer 3.7.0 各产物实际命名和结构化字段稳定性。
-6. Controller 非 root 用户访问 Docker Socket 和 Named Volume 的 UID/GID 策略。
-7. 任务容器生成文件的所有权回收方式。
-8. 大模型上传是否需要 P0 即支持分片和断点续传。
-9. 静态性能 HTML 在 sandbox iframe 中的可用程度。
-10. S600 双 Core 和 L2M 配置在真实模型上的编译/验证行为。
+2. GPU Runner 所需的共享内存和 DeviceRequest 参数。
+3. `hb_compile` 收到 SIGTERM 后的退出行为及中间文件完整性。
+4. Controller 非 root 用户访问 Docker Socket 和 Named Volume 的 UID/GID 策略。
+5. 任务容器生成文件的所有权回收方式。
+6. 大模型是否需要在 P0 即支持分片和断点续传；当前实现为带大小上限的流式上传。
+7. 静态性能 HTML 在 sandbox iframe 中的可用程度。
 
 Spike 结果应更新本设计并形成 ADR，而不是只保存在临时脚本中。
 
