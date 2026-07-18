@@ -196,8 +196,18 @@ class CatalogService:
             raise CatalogError("MODEL_VERSION_NOT_FOUND", str(exc), status_code=404) from exc
 
     def create_calibration_set(
-        self, *, project_id: str, name: str, description: str
+        self,
+        *,
+        project_id: str,
+        name: str,
+        description: str,
+        source_type: str = "images",
     ) -> dict[str, Any]:
+        if source_type not in {"images", "npy"}:
+            raise CatalogError(
+                "CALIBRATION_SOURCE_TYPE_INVALID",
+                "source_type must be images or npy",
+            )
         cleaned_name = _clean_text(name, "name", maximum=200)
         cleaned_description = _clean_text(
             description,
@@ -211,6 +221,7 @@ class CatalogService:
                 project_id=project_id,
                 name=cleaned_name,
                 description=cleaned_description,
+                source_type=source_type,
             )
         )
 
@@ -246,6 +257,7 @@ class CatalogService:
                 kind="calibration",
                 display_name=filename,
                 content_length=content_length,
+                calibration_source_type=str(existing["source_type"]),
             )
         except AssetStoreError as exc:
             raise self._asset_error(exc) from exc
@@ -259,6 +271,52 @@ class CatalogService:
             raise CatalogError("CALIBRATION_VERSION_NOT_FOUND", str(exc), status_code=404) from exc
         except ValueError as exc:
             raise CatalogError("CALIBRATION_VERSION_IMMUTABLE", str(exc), status_code=409) from exc
+
+    async def upload_calibration_archive(
+        self,
+        *,
+        version_id: str,
+        filename: str,
+        content_length: int | None,
+        chunks: AsyncIterable[bytes],
+    ) -> dict[str, Any]:
+        existing = self.get_calibration_version(version_id)
+        if existing["status"] != "DRAFT":
+            raise CatalogError(
+                "CALIBRATION_VERSION_IMMUTABLE",
+                "calibration version is immutable after finalization",
+                status_code=409,
+            )
+        remaining = 100 - int(existing["sample_count"])
+        try:
+            blobs = await self.asset_store.ingest_calibration_archive(
+                chunks,
+                display_name=filename,
+                content_length=content_length,
+                source_type=str(existing["source_type"]),
+                maximum_entries=remaining,
+            )
+        except AssetStoreError as exc:
+            raise self._asset_error(exc) from exc
+        try:
+            samples = self.repository.add_calibration_samples(
+                version_id=version_id,
+                blobs=blobs,
+            )
+        except KeyError as exc:
+            raise CatalogError(
+                "CALIBRATION_VERSION_NOT_FOUND", str(exc), status_code=404
+            ) from exc
+        except ValueError as exc:
+            raise CatalogError(
+                "CALIBRATION_ARCHIVE_CONFLICT", str(exc), status_code=409
+            ) from exc
+        return {
+            "version_id": version_id,
+            "source_type": existing["source_type"],
+            "imported_count": len(samples),
+            "samples": samples,
+        }
 
     def get_calibration_version(self, version_id: str) -> dict[str, Any]:
         try:
@@ -307,7 +365,7 @@ class CatalogService:
             )
         try:
             materialized = self.asset_store.materialize_calibration(
-                version_id, source["samples"]
+                version_id, source["source_type"], source["samples"]
             )
         except AssetStoreError as exc:
             raise self._asset_error(exc) from exc
@@ -341,7 +399,16 @@ class CatalogService:
 
     @staticmethod
     def _asset_error(exc: AssetStoreError) -> CatalogError:
-        status_code = 413 if exc.code == "UPLOAD_TOO_LARGE" else 422
+        status_code = (
+            413
+            if exc.code
+            in {
+                "UPLOAD_TOO_LARGE",
+                "CALIBRATION_ARCHIVE_TOO_LARGE",
+                "CALIBRATION_ARCHIVE_ENTRY_TOO_LARGE",
+            }
+            else 422
+        )
         if exc.code in {
             "BLOB_INTEGRITY_FAILED",
             "BLOB_PATH_INVALID",

@@ -85,16 +85,17 @@
             </section>
 
             <section class="panel asset-panel">
-              <div class="panel-heading"><div><span class="step-label">02 · CALIBRATION</span><h2>图片校准集</h2></div><span class="hint">20–100 张</span></div>
+              <div class="panel-heading"><div><span class="step-label">02 · CALIBRATION</span><h2>校准数据集</h2></div><span class="hint">20–100 份</span></div>
               <form id="calibration-create-form" class="inline-create">
                 <input id="calibration-name" maxlength="200" required placeholder="校准集名称">
+                <select id="calibration-source-type" aria-label="校准源类型"><option value="images">图片 + Recipe</option><option value="npy">直接 NPY</option></select>
                 <button class="button secondary" type="submit">新建草稿</button>
               </form>
               <label>当前版本<select id="calibration-version-select"><option value="">先创建校准集</option></select></label>
               <form id="sample-upload-form" class="upload-form compact">
-                <label class="drop-zone small" for="sample-files"><span class="upload-icon">＋</span><strong>选择 JPEG / PNG / BMP</strong><small id="sample-file-label">可一次选择多张，按选择顺序登记</small><input id="sample-files" type="file" accept=".jpg,.jpeg,.png,.bmp" multiple required></label>
+                <label class="drop-zone small" for="sample-files"><span class="upload-icon">＋</span><strong id="sample-drop-title">选择 JPEG / PNG / BMP</strong><small id="sample-file-label">可一次选择多份，按选择顺序登记</small><input id="sample-files" type="file" accept=".jpg,.jpeg,.png,.bmp" multiple required></label>
                 <div class="progress hidden" id="sample-progress"><span></span></div>
-                <div class="split-actions"><button class="button secondary" type="submit">上传样本</button><button id="finalize-calibration" class="button ghost" type="button">定稿并冻结</button></div>
+                <div class="split-actions"><button class="button secondary" type="submit">上传样本</button><label class="button ghost file-button" for="sample-archive">导入 ZIP<input id="sample-archive" type="file" accept=".zip"></label><button id="finalize-calibration" class="button ghost" type="button">定稿并冻结</button></div>
               </form>
               <div id="calibration-list" class="asset-list"></div>
             </section>
@@ -140,8 +141,9 @@
           <div class="form-grid three"><label>输入节点<input id="input-name" readonly></label><label>目标 Shape<input id="target-shape" required placeholder="1,3,224,224"></label><label>训练布局<select id="train-layout"><option>NCHW</option><option>NHWC</option></select></label><label>训练输入<select id="train-type"><option value="rgb">RGB</option><option value="bgr">BGR</option><option value="gray">Gray</option></select></label><label>Runtime 输入<select id="runtime-type"><option value="nv12">NV12</option><option value="rgb">RGB</option><option value="bgr">BGR</option><option value="yuv444">YUV444</option><option value="gray">Gray</option><option value="featuremap">Featuremap</option></select></label><label>Mean<input id="input-mean" placeholder="123.675,116.28,103.53"></label><label>Scale<input id="input-scale" placeholder="0.0171,0.0175,0.0174"></label><label>Std（可选）<input id="input-std" placeholder="留空"></label></div>
         </section>
         <section class="wizard-page hidden" data-page="4">
-          <div class="wizard-copy"><span class="step-label">STEP 04</span><h3>校准数据与预处理</h3><p>选择冻结的校准版本，并检查第一份样本的中心裁剪结果和归一化统计。</p></div>
-          <div class="form-grid three"><label>校准版本<select id="wizard-calibration" required><option value="">选择已定稿版本</option></select></label><label>使用样本数<input id="sample-limit" type="number" min="20" max="100" value="20"></label><label>校准算法<select id="calibration-algorithm"><option value="default">default</option><option value="mix">mix</option><option value="kl">kl</option><option value="max">max</option></select></label><label>Recipe<select id="recipe-id"><option value="image-center-crop">Center crop</option><option value="imagenet-resnet18">ImageNet ResNet18</option></select></label><label>短边 Resize<input id="resize-short" type="number" min="1" max="16384" value="256"></label><label>Recipe Mean<input id="recipe-mean" value="0.485,0.456,0.406"></label><label>Recipe Std<input id="recipe-std" value="0.229,0.224,0.225"></label></div>
+          <div class="wizard-copy"><span class="step-label">STEP 04</span><h3>校准数据与预处理</h3><p id="calibration-step-copy">选择冻结的校准版本，并检查第一份样本的中心裁剪结果和归一化统计。</p></div>
+          <div class="form-grid three"><label>校准版本<select id="wizard-calibration" required><option value="">选择已定稿版本</option></select></label><label>使用样本数<input id="sample-limit" type="number" min="20" max="100" value="20"></label><label>校准算法<select id="calibration-algorithm"><option value="default">default</option><option value="mix">mix</option><option value="kl">kl</option><option value="max">max</option></select></label></div>
+          <div id="image-recipe-fields" class="form-grid three"><label>Recipe<select id="recipe-id"><option value="image-center-crop">Center crop</option><option value="imagenet-resnet18">ImageNet ResNet18</option></select></label><label>短边 Resize<input id="resize-short" type="number" min="1" max="16384" value="256"></label><label>Recipe Mean<input id="recipe-mean" value="0.485,0.456,0.406"></label><label>Recipe Std<input id="recipe-std" value="0.229,0.224,0.225"></label></div>
           <div id="calibration-preview" class="preview-grid"><div class="preview-frame"><span>原图</span><img id="preview-original" alt="第一份校准原图"></div><div class="preview-frame"><span>处理后</span><canvas id="preview-processed" width="224" height="224"></canvas></div><div id="preview-stats" class="preview-stats"><span>选择校准版本后生成预览</span></div></div>
         </section>
         <section class="wizard-page hidden" data-page="5">

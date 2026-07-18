@@ -39,6 +39,8 @@ def normalize_configuration(
     calibration_options: dict[str, Any] | None,
     compiler_options: dict[str, Any],
     sample_count: int,
+    calibration_source_type: str = "images",
+    calibration_validation_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if inspection.get("compatibility_status") != "READY":
         raise ValueError("model inspection contains blocking compatibility errors")
@@ -100,19 +102,36 @@ def normalize_configuration(
         raise ValueError("calibration sample_limit exceeds the finalized sample count")
     height = target_shape[2] if train_layout == "NCHW" else target_shape[1]
     width = target_shape[3] if train_layout == "NCHW" else target_shape[2]
-    recipe_options = supplied_calibration.get("recipe") or {}
-    if not isinstance(recipe_options, dict):
-        raise ValueError("calibration recipe must be an object")
-    recipe_mean = [0.485, 0.456, 0.406] if channels == 3 else [0.0]
-    recipe_std = [0.229, 0.224, 0.225] if channels == 3 else [1.0]
-    recipe = {
-        "id": str(recipe_options.get("id") or "image-center-crop"),
-        "version": "1",
-        "resize_short": int(recipe_options.get("resize_short") or max(height, width)),
-        "crop_size": [height, width],
-        "mean": _number_list(recipe_options.get("mean", recipe_mean), "recipe.mean"),
-        "std": _number_list(recipe_options.get("std", recipe_std), "recipe.std"),
-    }
+    if calibration_source_type == "images":
+        recipe_options = supplied_calibration.get("recipe") or {}
+        if not isinstance(recipe_options, dict):
+            raise ValueError("calibration recipe must be an object")
+        recipe_mean = [0.485, 0.456, 0.406] if channels == 3 else [0.0]
+        recipe_std = [0.229, 0.224, 0.225] if channels == 3 else [1.0]
+        recipe: dict[str, Any] | None = {
+            "id": str(recipe_options.get("id") or "image-center-crop"),
+            "version": "1",
+            "resize_short": int(recipe_options.get("resize_short") or max(height, width)),
+            "crop_size": [height, width],
+            "mean": _number_list(recipe_options.get("mean", recipe_mean), "recipe.mean"),
+            "std": _number_list(recipe_options.get("std", recipe_std), "recipe.std"),
+        }
+    elif calibration_source_type == "npy":
+        if supplied_calibration.get("recipe") is not None:
+            raise ValueError("direct NPY calibration must not include an image recipe")
+        report = calibration_validation_report or {}
+        npy_shape = report.get("shape")
+        expected_shape = target_shape[1:]
+        if npy_shape != expected_shape:
+            raise ValueError(
+                f"NPY sample Shape {npy_shape} must match the batch-free model input "
+                f"Shape {expected_shape}"
+            )
+        if not isinstance(report.get("dtype"), str):
+            raise ValueError("NPY calibration validation report is incomplete")
+        recipe = None
+    else:
+        raise ValueError("calibration source_type must be images or npy")
 
     core_num = compiler_options.get("core_num")
     if core_num is None:
@@ -138,6 +157,7 @@ def normalize_configuration(
             }
         ],
         "calibration": {
+            "source_type": calibration_source_type,
             "algorithm": str(supplied_calibration.get("algorithm") or "default"),
             "sample_limit": sample_limit,
             "recipe": recipe,

@@ -13,6 +13,7 @@ dependencies = [
   "docker>=7.1,<8",
   "fastapi>=0.115,<1",
   "jsonschema>=4.23,<5",
+  "numpy>=1.26,<3",
   "pydantic>=2.10,<3",
   "PyYAML>=6.0,<7",
   "sqlalchemy>=2.0,<3",
@@ -45,6 +46,7 @@ testpaths = ["tests"]
 pythonpath = ["services/controller", "packages/contracts", "runner"]
 markers = [
   "docker: requires access to a local Docker Engine",
+  "release: runs the explicit local release acceptance gate",
 ]
 
 [tool.ruff]

@@ -171,6 +171,7 @@ class CalibrationSample(Base):
     )
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    validation: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     version: Mapped[CalibrationVersion] = relationship(back_populates="samples")

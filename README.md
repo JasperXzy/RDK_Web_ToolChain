@@ -1,7 +1,7 @@
 # RDK WebToolChain
 
 RDK WebToolChain 是面向 S100/S600 与 OpenExplorer 3.7.0 的本地模型转换工作台。
-当前代码已完成《项目设计文档》定义的 M2 P0 Web 产品闭环：用户可以在浏览器中完成
+当前代码已完成《项目设计文档》定义的 M2 P0 Web 产品闭环与 M2.1 发布加固：用户可以在浏览器中完成
 环境预检、ONNX 检查、校准数据管理、六步配置、队列执行、实时日志、失败重试、结果查看
 和可复现导出。
 
@@ -11,8 +11,9 @@ RDK WebToolChain 是面向 S100/S600 与 OpenExplorer 3.7.0 的本地模型转�
   并运行受控 Runner Smoke Test 展示工具链版本。
 - ONNX 上传后自动创建隔离检查任务，解析 IR/opset、输入输出、算子统计和 external data；
   只有检查为 `READY` 且哈希未变化的版本可以提交转换。
-- 图片校准集按内容寻址保存，支持 JPEG/PNG/BMP、20～100 个样本、清单定稿，以及浏览器
-  端 Resize、Center Crop、归一化结果和统计预览。
+- 校准集按内容寻址保存，支持 JPEG/PNG/BMP 图片或直接 NPY、单文件/ZIP 批量导入、20～100
+  份样本和不可变清单。图片路径提供 Resize、Center Crop 与归一化预览；直接 NPY 路径冻结
+  Shape、dtype、布局、有限数值统计，并在提交前与模型的去 batch 输入 Shape 交叉校验。
 - 六步向导根据模型结构和 S100/S600 Target Profile 生成类型化配置与 YAML 预览；草稿保存
   在当前浏览器，NV12、通道、归一化、Core 和 L2M 等交叉约束在创建容器前校验。
 - SQLite 持久队列默认只运行一个 Runner。Run 冻结模型、校准清单、Profile、生成 YAML、
@@ -66,8 +67,20 @@ RDKWT_RUN_DOCKER_TESTS=1 .venv/bin/python -m pytest \
   tests/integration/test_controller_docker_e2e.py
 ```
 
-真实 S100/S600 Golden 测试为显式启用项，需要本机 ResNet18 ONNX 与 20 张校准图片；变量
-说明见 `tests/integration/test_openexplorer_resnet18.py`。
+真实 S100/S600 发布门禁为显式启用项，需要本机 ResNet18 ONNX 与至少 20 张校准图片：
+
+```bash
+RDKWT_RUN_OE_RELEASE_TESTS=1 \
+RDKWT_RESNET18_ONNX=/path/to/resnet18.onnx \
+RDKWT_IMAGENET_CALIBRATION_DIR=/path/to/imagenet \
+.venv/bin/python -m pytest \
+  tests/integration/test_controller_openexplorer_release.py -q
+```
+
+该门禁通过完整 Controller API 执行模型上传与隔离检查、ZIP 导入与冻结、S100/S600 编译、
+HBM 哈希下载和可复现 ZIP 校验。更轻量的 Adapter Golden 说明见
+`tests/integration/test_openexplorer_resnet18.py`；完整发布步骤见
+[M2.1 发布检查表](docs/M2_1_RELEASE_CHECKLIST.md)。
 
 ## API 边界
 
@@ -76,9 +89,10 @@ RDKWT_RUN_DOCKER_TESTS=1 .venv/bin/python -m pytest \
 `X-Filename` 或 UTF-8 Base64 编码的 `X-Filename-B64` 传递。转换 API 只接受已登记的资源
 版本 ID 和白名单配置，不接受镜像、命令、宿主机路径、挂载或 `privileged` 参数。
 
-当前 M2 的正式转换路径是单个静态四维 ONNX 输入、图片校准、CPU Runner 与 PTQ。
-NPY/ZIP 校准导入、多输入/动态 Shape、HBRuntime、`hb_verifier`、任务比较、GPU 和板端闭环
+当前正式转换路径是单个四维 ONNX 输入（动态维度需提供显式正整数目标 Shape）、图片或直接
+NPY 校准、CPU Runner 与 PTQ。多输入、HBRuntime、`hb_verifier`、任务比较、GPU 和板端闭环
 属于后续阶段。
 
 产品范围与工程边界见 [PRD](docs/PRD.md)、[项目设计文档](docs/PROJECT_DESIGN.md) 和
-[M2 编排决策](docs/adr/ADR-014-m2-orchestration-and-web-product.md)。
+[M2 编排决策](docs/adr/ADR-014-m2-orchestration-and-web-product.md) 和
+[M2.1 发布加固决策](docs/adr/ADR-015-m2-1-calibration-and-release-gate.md)。

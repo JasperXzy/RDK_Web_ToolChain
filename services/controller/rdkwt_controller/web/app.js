@@ -171,6 +171,14 @@ function projectCalibrations() {
   );
 }
 
+function calibrationVersion(versionId) {
+  return projectCalibrations().find(({version}) => version.id === versionId)?.version || null;
+}
+
+function calibrationSourceLabel(sourceType) {
+  return sourceType === "npy" ? "直接 NPY" : "图片";
+}
+
 function renderCurrentProject() {
   const project = state.currentProject;
   if (!project) return;
@@ -242,19 +250,34 @@ function renderCalibrations() {
     const row = el("div", "asset-row");
     const copy = el("div");
     const warningCount = version.validation_report?.warnings?.length || 0;
+    const sourceLabel = calibrationSourceLabel(version.source_type);
+    const tensorMetadata = version.source_type === "npy" && version.validation_report?.shape
+      ? ` · [${version.validation_report.shape.join(", ")}] ${version.validation_report.dtype}` : "";
     copy.append(
       el("strong", "", calibrationSet.name),
-      el("small", "", `${version.sample_count} 个样本 · ${version.status === "READY" ? "清单已冻结" : "可继续上传"}${warningCount ? ` · ${warningCount} 警告` : ""}`),
+      el("small", "", `${sourceLabel} · ${version.sample_count} 份${tensorMetadata} · ${version.status === "READY" ? "清单已冻结" : "可继续上传"}${warningCount ? ` · ${warningCount} 警告` : ""}`),
     );
     row.append(copy, el("span", `asset-tag${version.status === "DRAFT" ? " draft" : ""}`, version.status));
     list.append(row);
-    const option = new Option(`${calibrationSet.name} · ${version.sample_count} 张 · ${version.status}`, version.id);
+    const option = new Option(`${calibrationSet.name} · ${sourceLabel} · ${version.sample_count} 份 · ${version.status}`, version.id);
     option.disabled = version.status !== "DRAFT";
     versionSelect.add(option);
   }
   if ([...versionSelect.options].some((option) => option.value === selected)) versionSelect.value = selected;
-  if (!projectCalibrations().length) list.append(el("div", "empty-state", "新建草稿后可批量上传校准图片"));
+  if (!projectCalibrations().length) list.append(el("div", "empty-state", "新建草稿后可批量上传图片或直接 NPY"));
+  syncCalibrationUploadMode();
   populateWizardCalibrations();
+}
+
+function syncCalibrationUploadMode() {
+  const selected = calibrationVersion($("#calibration-version-select").value);
+  const sourceType = selected?.source_type || "images";
+  const npy = sourceType === "npy";
+  $("#sample-files").accept = npy ? ".npy" : ".jpg,.jpeg,.png,.bmp";
+  $("#sample-drop-title").textContent = npy ? "选择直接 NPY 文件" : "选择 JPEG / PNG / BMP";
+  $("#sample-file-label").textContent = selected
+    ? `可一次选择多份${npy ? " NPY" : "图片"}，按选择顺序登记`
+    : "请先选择一个 DRAFT 校准版本";
 }
 
 async function loadRuns() {
@@ -431,7 +454,7 @@ function populateWizardCalibrations() {
   select.replaceChildren(new Option("选择已定稿版本", ""));
   for (const {calibrationSet, version} of projectCalibrations()) {
     if (version.status === "READY" && version.sample_count >= 20) {
-      select.add(new Option(`${calibrationSet.name} · ${version.sample_count} 张`, version.id));
+      select.add(new Option(`${calibrationSet.name} · ${calibrationSourceLabel(version.source_type)} · ${version.sample_count} 份`, version.id));
     }
   }
   if ([...select.options].some((option) => option.value === selected)) select.value = selected;
@@ -622,14 +645,23 @@ function validateWizardStep(step) {
     });
   }
   if (step === 4) {
-    const selected = projectCalibrations().find(({version}) => version.id === $("#wizard-calibration").value)?.version;
+    const selected = calibrationVersion($("#wizard-calibration").value);
     const limit = Number($("#sample-limit").value);
     if (!selected || selected.status !== "READY") throw new Error("请选择已定稿校准版本");
     if (!Number.isInteger(limit) || limit < 20 || limit > selected.sample_count) throw new Error(`使用样本数必须在 20～${selected.sample_count} 之间`);
-    const {channels} = inputGeometry();
-    if (parseNumbers($("#recipe-mean").value, "Recipe Mean", false).length !== channels) throw new Error(`Recipe Mean 必须包含 ${channels} 项`);
-    const std = parseNumbers($("#recipe-std").value, "Recipe Std", false);
-    if (std.length !== channels || std.some((item) => item === 0)) throw new Error(`Recipe Std 必须包含 ${channels} 个非零值`);
+    if (selected.source_type === "npy") {
+      const expectedShape = parseShape().slice(1);
+      const actualShape = selected.validation_report?.shape;
+      if (JSON.stringify(actualShape) !== JSON.stringify(expectedShape)) {
+        throw new Error(`直接 NPY Shape [${actualShape?.join(", ") || "未知"}] 必须匹配模型去除 batch 后的 [${expectedShape.join(", ")}]`);
+      }
+      if (!selected.validation_report?.dtype) throw new Error("直接 NPY 校准报告缺少 dtype");
+    } else {
+      const {channels} = inputGeometry();
+      if (parseNumbers($("#recipe-mean").value, "Recipe Mean", false).length !== channels) throw new Error(`Recipe Mean 必须包含 ${channels} 项`);
+      const std = parseNumbers($("#recipe-std").value, "Recipe Std", false);
+      if (std.length !== channels || std.some((item) => item === 0)) throw new Error(`Recipe Std 必须包含 ${channels} 个非零值`);
+    }
   }
   if (step === 5) {
     if (!$("#output-prefix").checkValidity()) throw new Error("输出前缀格式不合法");
@@ -640,6 +672,16 @@ function validateWizardStep(step) {
 
 function conversionPayload() {
   const l2m = $("#l2m-mode").value;
+  const selectedCalibration = calibrationVersion($("#wizard-calibration").value);
+  const calibration = {algorithm: $("#calibration-algorithm").value};
+  if (selectedCalibration?.source_type !== "npy") {
+    calibration.recipe = {
+      id: $("#recipe-id").value,
+      resize_short: Number($("#resize-short").value),
+      mean: parseNumbers($("#recipe-mean").value, "Recipe Mean", false),
+      std: parseNumbers($("#recipe-std").value, "Recipe Std", false),
+    };
+  }
   return {
     profile_id: $("#wizard-profile").value,
     model_version_id: $("#wizard-model").value,
@@ -657,15 +699,7 @@ function conversionPayload() {
         std: parseNumbers($("#input-std").value, "Std"),
       },
     },
-    calibration: {
-      algorithm: $("#calibration-algorithm").value,
-      recipe: {
-        id: $("#recipe-id").value,
-        resize_short: Number($("#resize-short").value),
-        mean: parseNumbers($("#recipe-mean").value, "Recipe Mean", false),
-        std: parseNumbers($("#recipe-std").value, "Recipe Std", false),
-      },
-    },
+    calibration,
     core_num: Number($("#core-num").value),
     max_l2m_size: l2m === "auto" ? "auto" : l2m === "custom" ? Number($("#l2m-custom").value) : 0,
     compile_mode: $("#compile-mode").value,
@@ -689,8 +723,14 @@ async function fetchYamlPreview() {
 }
 
 function updateCalibrationSelection(save = true) {
-  const selected = projectCalibrations().find(({version}) => version.id === $("#wizard-calibration").value)?.version;
+  const selected = calibrationVersion($("#wizard-calibration").value);
+  const npy = selected?.source_type === "npy";
   if (selected) $("#sample-limit").value = Math.min(Math.max(20, Number($("#sample-limit").value) || 20), selected.sample_count);
+  $("#image-recipe-fields").classList.toggle("hidden", npy);
+  $("#calibration-preview").classList.toggle("npy-mode", npy);
+  $("#calibration-step-copy").textContent = npy
+    ? "直接 NPY 不再执行图片 Recipe；提交前会核对冻结的 Shape、dtype、哈希和有限数值统计。"
+    : "选择冻结的校准版本，并检查第一份样本的中心裁剪结果和归一化统计。";
   renderCalibrationPreview().catch((error) => {
     $("#preview-stats").replaceChildren(el("span", "", `预览失败：${error.message}`));
   });
@@ -699,6 +739,7 @@ function updateCalibrationSelection(save = true) {
 
 async function renderCalibrationPreview() {
   const versionId = $("#wizard-calibration").value;
+  const selected = calibrationVersion(versionId);
   const image = $("#preview-original");
   const canvas = $("#preview-processed");
   const statsRoot = $("#preview-stats");
@@ -706,6 +747,27 @@ async function renderCalibrationPreview() {
     image.removeAttribute("src");
     canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
     statsRoot.replaceChildren(el("span", "", "选择校准版本后生成预览"));
+    return;
+  }
+  if (selected?.source_type === "npy") {
+    image.removeAttribute("src");
+    canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+    const report = selected.validation_report || {};
+    const statistics = report.first_sample_statistics || {};
+    const formatStatistic = (value) => Number.isFinite(Number(value)) ? Number(value).toPrecision(6) : "—";
+    const stats = {
+      "数据路径": "直接 NPY（无图片 Recipe）",
+      "样本 Shape": `[${(report.shape || []).join(", ")}]`,
+      "dtype": report.dtype || "—",
+      "第一份最小值": formatStatistic(statistics.minimum),
+      "第一份最大值": formatStatistic(statistics.maximum),
+      "第一份均值": formatStatistic(statistics.mean),
+      "第一份标准差": formatStatistic(statistics.standard_deviation),
+    };
+    statsRoot.replaceChildren();
+    Object.entries(stats).forEach(([name, value]) => {
+      const line = el("div", "stat-line"); line.append(el("span", "", name), el("code", "", value)); statsRoot.append(line);
+    });
     return;
   }
   const {channels, height, width, shape} = inputGeometry();
@@ -1019,12 +1081,24 @@ $("#model-upload-form").addEventListener("submit", async (event) => {
 $("#calibration-create-form").addEventListener("submit", async (event) => {
   event.preventDefault(); if (!state.currentProject) return;
   try {
-    const created = await api(`/api/v1/projects/${state.currentProject.id}/calibration-sets`, {method: "POST", body: JSON.stringify({name: $("#calibration-name").value, description: ""})});
-    event.target.reset(); await selectProject(state.currentProject.id, false); $("#calibration-version-select").value = created.versions[0].id; toast("校准集草稿已创建");
+    const created = await api(`/api/v1/projects/${state.currentProject.id}/calibration-sets`, {method: "POST", body: JSON.stringify({
+      name: $("#calibration-name").value,
+      description: "",
+      source_type: $("#calibration-source-type").value,
+    })});
+    event.target.reset();
+    await selectProject(state.currentProject.id, false);
+    $("#calibration-version-select").value = created.versions[0].id;
+    syncCalibrationUploadMode();
+    toast(`${calibrationSourceLabel(created.versions[0].source_type)}校准集草稿已创建`);
   } catch (error) { toast(error.message, true); }
 });
 
-$("#sample-files").addEventListener("change", (event) => { $("#sample-file-label").textContent = event.target.files.length ? `已选择 ${event.target.files.length} 个文件` : "可一次选择多张，按选择顺序登记"; });
+$("#calibration-version-select").addEventListener("change", syncCalibrationUploadMode);
+$("#sample-files").addEventListener("change", (event) => {
+  if (event.target.files.length) $("#sample-file-label").textContent = `已选择 ${event.target.files.length} 个文件`;
+  else syncCalibrationUploadMode();
+});
 $("#sample-upload-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const versionId = $("#calibration-version-select").value; const files = [...$("#sample-files").files];
@@ -1034,18 +1108,44 @@ $("#sample-upload-form").addEventListener("submit", async (event) => {
     for (let index = 0; index < files.length; index += 1) {
       await uploadBinary(`/api/v1/calibration-versions/${versionId}/samples`, files[index], (ratio) => setProgress("#sample-progress", (index + ratio) / files.length));
     }
-    event.target.reset(); $("#sample-file-label").textContent = "可一次选择多张，按选择顺序登记";
-    await selectProject(state.currentProject.id, false); $("#calibration-version-select").value = versionId; toast(`${files.length} 个校准样本已登记`);
+    event.target.reset();
+    await selectProject(state.currentProject.id, false);
+    $("#calibration-version-select").value = versionId;
+    syncCalibrationUploadMode();
+    toast(`${files.length} 份校准样本已登记`);
   } catch (error) { toast(error.message, true); } finally { button.disabled = false; }
+});
+
+$("#sample-archive").addEventListener("change", async (event) => {
+  const file = event.target.files[0];
+  const versionId = $("#calibration-version-select").value;
+  if (!file) return;
+  if (!versionId) {
+    event.target.value = "";
+    return toast("请选择一个 DRAFT 校准版本", true);
+  }
+  event.target.disabled = true;
+  try {
+    const result = await uploadBinary(`/api/v1/calibration-versions/${versionId}/archives`, file, (ratio) => setProgress("#sample-progress", ratio));
+    await selectProject(state.currentProject.id, false);
+    $("#calibration-version-select").value = versionId;
+    syncCalibrationUploadMode();
+    toast(`ZIP 已原子导入 ${result.imported_count} 份校准样本`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    event.target.disabled = false;
+    event.target.value = "";
+  }
 });
 
 $("#finalize-calibration").addEventListener("click", async () => {
   const versionId = $("#calibration-version-select").value; if (!versionId) return toast("请选择一个 DRAFT 校准版本", true);
   try {
     const current = projectCalibrations().find(({version}) => version.id === versionId)?.version;
-    if (!window.confirm(`定稿后不可再添加样本。确认冻结当前 ${current?.sample_count || 0} 个样本？`)) return;
+    if (!window.confirm(`定稿后不可再添加样本。确认冻结当前 ${current?.sample_count || 0} 份样本？`)) return;
     const result = await api(`/api/v1/calibration-versions/${versionId}/finalize`, {method: "POST"});
-    await selectProject(state.currentProject.id, false); toast(result.sample_count < 20 ? "版本已定稿，但少于 20 张，不能用于标准转换" : "校准版本已定稿，Manifest 与源文件已冻结");
+    await selectProject(state.currentProject.id, false); toast(result.sample_count < 20 ? "版本已定稿，但少于 20 份，不能用于标准转换" : "校准版本已定稿，Manifest 与源文件已冻结");
   } catch (error) { toast(error.message, true); }
 });
 

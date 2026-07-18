@@ -10,6 +10,8 @@
 - [ADR-012](./adr/ADR-012-openexplorer-3.7-m1-baseline.md)：记录 M1 ResNet18 S100/S600 真实校准编译基线与 Adapter 决策。
 - [ADR-013](./adr/ADR-013-m2-project-asset-catalog.md)：记录 M2 项目/资产目录、内容寻址存储、校准版本和本地 Web 安全边界。
 - [ADR-014](./adr/ADR-014-m2-orchestration-and-web-product.md)：记录 M2 独立模型检查、持久队列、SSE、取消/恢复、结果导出和六步 Web 闭环。
+- [ADR-015](./adr/ADR-015-m2-1-calibration-and-release-gate.md)：记录 M2.1 直接 NPY、ZIP 原子导入、真实 opset 边界和 Controller 级 S100/S600 发布门禁。
+- [M2.1 发布检查表](./M2_1_RELEASE_CHECKLIST.md)：记录镜像构建、自动化测试、真实资产门禁与发布判定命令。
 
 ## 已确认的核心决策
 

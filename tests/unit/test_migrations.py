@@ -40,6 +40,9 @@ def test_m2_migration_preserves_existing_m0_runs(tmp_path: Path) -> None:
     attempt_columns = {
         item["name"] for item in inspect(engine).get_columns("run_attempts")
     }
+    calibration_sample_columns = {
+        item["name"] for item in inspect(engine).get_columns("calibration_samples")
+    }
     with engine.connect() as connection:
         preserved = connection.scalar(
             text(
@@ -70,4 +73,5 @@ def test_m2_migration_preserves_existing_m0_runs(tmp_path: Path) -> None:
     }.issubset(columns)
     assert {"inspection_run_id", "inspected_at"}.issubset(model_columns)
     assert {"stage", "cancel_requested_at", "recovered"}.issubset(attempt_columns)
+    assert "validation" in calibration_sample_columns
     assert preserved == "SUCCEEDED"

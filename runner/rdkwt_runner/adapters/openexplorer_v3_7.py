@@ -232,7 +232,13 @@ def validate_configuration(configuration: Any) -> dict[str, Any]:
     )
 
     calibration = _expect_object(config["calibration"], "calibration")
-    _expect_exact_fields(calibration, {"algorithm", "sample_limit", "recipe"}, "calibration")
+    _expect_exact_fields(
+        calibration,
+        {"source_type", "algorithm", "sample_limit", "recipe"},
+        "calibration",
+    )
+    if calibration["source_type"] not in {"images", "npy"}:
+        raise ValueError("calibration.source_type must be images or npy")
     if calibration["algorithm"] not in SUPPORTED_CALIBRATION_ALGORITHMS:
         raise ValueError("unsupported calibration algorithm")
     if (
@@ -241,32 +247,37 @@ def validate_configuration(configuration: Any) -> dict[str, Any]:
         or not 20 <= calibration["sample_limit"] <= 100
     ):
         raise ValueError("calibration.sample_limit must be between 20 and 100")
-    recipe = _expect_object(calibration["recipe"], "calibration.recipe")
-    _expect_exact_fields(
-        recipe,
-        {"id", "version", "resize_short", "crop_size", "mean", "std"},
-        "calibration.recipe",
-    )
-    if recipe["id"] not in {"imagenet-resnet18", "image-center-crop"} or recipe[
-        "version"
-    ] != "1":
-        raise ValueError("unsupported calibration recipe")
-    if (
-        isinstance(recipe["resize_short"], bool)
-        or not isinstance(recipe["resize_short"], int)
-        or recipe["resize_short"] < 1
-    ):
-        raise ValueError("calibration.recipe.resize_short must be positive")
-    if recipe["crop_size"] != [height, width]:
-        raise ValueError("calibration crop_size must match the target input height and width")
-    _numeric_list(
-        recipe["mean"], "calibration.recipe.mean", allowed_lengths={channels}
-    )
-    std = _numeric_list(
-        recipe["std"], "calibration.recipe.std", allowed_lengths={channels}
-    )
-    if any(item == 0 for item in std):
-        raise ValueError("calibration.recipe.std cannot contain zero")
+    if calibration["source_type"] == "images":
+        recipe = _expect_object(calibration["recipe"], "calibration.recipe")
+        _expect_exact_fields(
+            recipe,
+            {"id", "version", "resize_short", "crop_size", "mean", "std"},
+            "calibration.recipe",
+        )
+        if recipe["id"] not in {"imagenet-resnet18", "image-center-crop"} or recipe[
+            "version"
+        ] != "1":
+            raise ValueError("unsupported calibration recipe")
+        if (
+            isinstance(recipe["resize_short"], bool)
+            or not isinstance(recipe["resize_short"], int)
+            or recipe["resize_short"] < 1
+        ):
+            raise ValueError("calibration.recipe.resize_short must be positive")
+        if recipe["crop_size"] != [height, width]:
+            raise ValueError(
+                "calibration crop_size must match the target input height and width"
+            )
+        _numeric_list(
+            recipe["mean"], "calibration.recipe.mean", allowed_lengths={channels}
+        )
+        std = _numeric_list(
+            recipe["std"], "calibration.recipe.std", allowed_lengths={channels}
+        )
+        if any(item == 0 for item in std):
+            raise ValueError("calibration.recipe.std cannot contain zero")
+    elif calibration["recipe"] is not None:
+        raise ValueError("direct NPY calibration must not include a recipe")
 
     compiler = _expect_object(config["compiler"], "compiler")
     _expect_exact_fields(
@@ -515,6 +526,11 @@ class OpenExplorer370Adapter:
         return {"march": profile["march"], **result}
 
     def preprocess(self) -> dict[str, Any]:
+        if self.configuration["calibration"]["source_type"] == "npy":
+            return self._preprocess_npy()
+        return self._preprocess_images()
+
+    def _preprocess_images(self) -> dict[str, Any]:
         try:
             import numpy as np
             from PIL import Image
@@ -622,6 +638,7 @@ class OpenExplorer370Adapter:
 
         manifest = {
             "schema_version": "1",
+            "source_type": "images",
             "recipe": recipe,
             "sample_count": len(samples),
             "samples": samples,
@@ -652,6 +669,186 @@ class OpenExplorer370Adapter:
             "preview": self.calibration_preview_path.relative_to(
                 self.attempt_root
             ).as_posix(),
+            "first_sample_statistics": {
+                key: samples[0][key]
+                for key in ("shape", "dtype", "minimum", "maximum", "mean")
+            },
+        }
+
+    def _preprocess_npy(self) -> dict[str, Any]:
+        try:
+            import numpy as np
+        except ImportError as exc:
+            raise AdapterExecutionError(
+                "CALIBRATION_PREPROCESS_FAILED",
+                f"NPY validation dependency unavailable: {exc}",
+                step="preprocess",
+            ) from exc
+        if not self.calibration_source.is_dir() or self.calibration_source.is_symlink():
+            raise AdapterExecutionError(
+                "CALIBRATION_INVALID_SAMPLE",
+                "calibration source must be a regular directory",
+                step="preprocess",
+            )
+        candidates: list[Path] = []
+        for path in sorted(self.calibration_source.iterdir(), key=lambda item: item.name):
+            if path.is_symlink() or not path.is_file():
+                raise AdapterExecutionError(
+                    "CALIBRATION_INVALID_SAMPLE",
+                    f"direct NPY calibration contains a non-regular file: {path.name}",
+                    step="preprocess",
+                )
+            if path.suffix.lower() != ".npy":
+                raise AdapterExecutionError(
+                    "CALIBRATION_INVALID_SAMPLE",
+                    f"direct NPY calibration contains a non-NPY file: {path.name}",
+                    step="preprocess",
+                )
+            candidates.append(path)
+        sample_limit = int(self.configuration["calibration"]["sample_limit"])
+        selected = candidates[:sample_limit]
+        if len(selected) < 20:
+            raise AdapterExecutionError(
+                "CALIBRATION_INVALID_SAMPLE",
+                f"at least 20 NPY calibration samples are required; found {len(selected)}",
+                step="preprocess",
+            )
+        expected_shape = self.configuration["inputs"][0]["target_shape"][1:]
+        allowed_dtypes = {
+            "bool",
+            "int8",
+            "int16",
+            "int32",
+            "uint8",
+            "uint16",
+            "uint32",
+            "float16",
+            "float32",
+            "float64",
+        }
+        self.calibration_root.mkdir(parents=True, exist_ok=True)
+        samples: list[dict[str, Any]] = []
+        for index, source in enumerate(selected):
+            if self.is_cancel_requested():
+                raise InterruptedError("runner cancellation requested")
+            try:
+                array = np.load(
+                    source,
+                    allow_pickle=False,
+                    mmap_mode="r",
+                    max_header_size=16 * 1024,
+                )
+                if not isinstance(array, np.ndarray):
+                    raise ValueError("file does not contain one array")
+                dtype = array.dtype
+                if (
+                    dtype.name not in allowed_dtypes
+                    or dtype.hasobject
+                    or dtype.fields
+                    or dtype.subdtype
+                ):
+                    raise ValueError(f"unsupported dtype {array.dtype}")
+                if dtype.byteorder == ">" or (
+                    dtype.byteorder == "=" and not np.little_endian
+                ):
+                    raise ValueError("big-endian arrays are not supported")
+                if list(array.shape) != expected_shape:
+                    raise ValueError(
+                        f"Shape {list(array.shape)} does not match {expected_shape}"
+                    )
+                if not array.flags.c_contiguous:
+                    raise ValueError("Fortran-order arrays are not supported")
+                offset = int(getattr(array, "offset", 0))
+                if offset < 1 or offset + int(array.nbytes) != source.stat().st_size:
+                    raise ValueError("payload size does not match the NPY header")
+                flattened = array.reshape(-1)
+                minimum = float("inf")
+                maximum = float("-inf")
+                total = 0.0
+                for start in range(0, int(array.size), 1024 * 1024):
+                    values = np.asarray(
+                        flattened[start : start + 1024 * 1024], dtype=np.float64
+                    )
+                    if not np.isfinite(values).all():
+                        raise ValueError("array contains NaN or infinite values")
+                    minimum = min(minimum, float(values.min()))
+                    maximum = max(maximum, float(values.max()))
+                    with np.errstate(over="ignore", invalid="ignore"):
+                        total += float(values.sum(dtype=np.float64))
+                    if not np.isfinite(total):
+                        raise ValueError(
+                            "array values are too large for safe finite statistics"
+                        )
+            except (OSError, TypeError, ValueError) as exc:
+                raise AdapterExecutionError(
+                    "CALIBRATION_NPY_INVALID",
+                    f"failed to validate direct NPY sample {source.name}: {exc}",
+                    step="preprocess",
+                    details={"sample": source.name},
+                ) from exc
+            source_digest = sha256_file(source)
+            output = self.calibration_root / f"{index:04d}_{source_digest[:12]}.npy"
+            shutil.copyfile(source, output, follow_symlinks=False)
+            output_digest = sha256_file(output)
+            if output_digest != source_digest:
+                raise AdapterExecutionError(
+                    "CALIBRATION_NPY_INVALID",
+                    f"copied NPY sample failed hash validation: {source.name}",
+                    step="preprocess",
+                )
+            samples.append(
+                {
+                    "index": index,
+                    "source_name": source.name,
+                    "source_sha256": source_digest,
+                    "output_name": output.name,
+                    "output_sha256": output_digest,
+                    "shape": list(array.shape),
+                    "dtype": array.dtype.name,
+                    "minimum": minimum,
+                    "maximum": maximum,
+                    "mean": total / int(array.size),
+                }
+            )
+
+        manifest = {
+            "schema_version": "1",
+            "source_type": "npy",
+            "recipe": None,
+            "sample_count": len(samples),
+            "samples": samples,
+        }
+        atomic_write_json(self.calibration_manifest_path, manifest)
+        generated = render_openexplorer_config(
+            self.configuration,
+            model_path=self.model_path,
+            calibration_dir=self.calibration_root,
+            working_dir=self.output_root,
+        )
+        self._validate_generated_paths(generated)
+        try:
+            import yaml
+
+            rendered = yaml.safe_dump(generated, sort_keys=False, allow_unicode=True)
+            if yaml.safe_load(rendered) != generated:
+                raise ValueError("YAML round-trip changed the generated configuration")
+        except Exception as exc:
+            raise AdapterExecutionError(
+                "CONFIG_INVALID",
+                f"failed to render OpenExplorer YAML: {exc}",
+                step="preprocess",
+            ) from exc
+        atomic_write_text(self.generated_config, rendered)
+        return {
+            "source_type": "npy",
+            "sample_count": len(samples),
+            "calibration_dir": self.calibration_root.relative_to(
+                self.attempt_root
+            ).as_posix(),
+            "configuration": self.generated_config.relative_to(
+                self.attempt_root
+            ).as_posix(),
+            "preview": None,
             "first_sample_statistics": {
                 key: samples[0][key]
                 for key in ("shape", "dtype", "minimum", "maximum", "mean")

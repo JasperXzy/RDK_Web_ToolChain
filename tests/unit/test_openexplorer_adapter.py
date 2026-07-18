@@ -39,6 +39,7 @@ def make_configuration(profile_id: str) -> dict[str, object]:
             }
         ],
         "calibration": {
+            "source_type": "images",
             "algorithm": "default",
             "sample_limit": 20,
             "recipe": {
@@ -205,3 +206,50 @@ def test_preprocess_writes_deterministic_npy_manifest_and_yaml(tmp_path: Path) -
     assert generated["calibration_parameters"]["cal_data_dir"] == str(
         adapter.calibration_root
     )
+
+
+def test_direct_npy_preprocess_validates_and_preserves_samples(tmp_path: Path) -> None:
+    np = pytest.importorskip("numpy")
+    model = tmp_path / "assets" / "model.onnx"
+    calibration = tmp_path / "assets" / "calibration"
+    attempt = tmp_path / "runs" / "attempt"
+    model.parent.mkdir(parents=True)
+    calibration.mkdir()
+    attempt.mkdir(parents=True)
+    model.write_bytes(b"onnx-placeholder")
+    for index in range(20):
+        np.save(
+            calibration / f"sample-{index:02d}.npy",
+            np.full((3, 2, 2), index, dtype=np.float32),
+            allow_pickle=False,
+        )
+    configuration = make_configuration("s100-oe-3.7.0")
+    configuration["inputs"][0]["target_shape"] = [1, 3, 2, 2]  # type: ignore[index]
+    configuration["calibration"] = {  # type: ignore[index]
+        "source_type": "npy",
+        "algorithm": "default",
+        "sample_limit": 20,
+        "recipe": None,
+    }
+    adapter = OpenExplorer370Adapter(
+        request={
+            "configuration": configuration,
+            "limits": {"timeout_seconds": 30, "max_log_bytes": 1_048_576},
+        },
+        model_path=model,
+        calibration_source=calibration,
+        attempt_root=attempt,
+        is_cancel_requested=lambda: False,
+    )
+
+    details = adapter.preprocess()
+    manifest = json.loads(adapter.calibration_manifest_path.read_text())
+    outputs = sorted(adapter.calibration_root.glob("*.npy"))
+
+    assert details["source_type"] == "npy"
+    assert details["first_sample_statistics"]["shape"] == [3, 2, 2]
+    assert details["preview"] is None
+    assert manifest["source_type"] == "npy"
+    assert manifest["recipe"] is None
+    assert len(outputs) == 20
+    assert np.load(outputs[-1], allow_pickle=False).mean() == 19.0

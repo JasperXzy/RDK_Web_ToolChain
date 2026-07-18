@@ -309,7 +309,8 @@ GPU 不可用不得阻止 CPU 转换。
 - 静态/动态维度。
 - 是否存在 external data 依赖。
 
-首期支持范围为 IR version ≤ 9、opset 10～19。超出范围时标记为阻断错误。
+首期支持范围为 IR version ≤ 9、opset 8～19。opset 8 下界由 M2.1 的真实
+ResNet18/OpenExplorer 3.7 双平台发布门禁确认；超出范围时标记为阻断错误。
 
 #### MODEL-003 模型信息展示（P0）
 
@@ -989,4 +990,3 @@ SQLite schema 变更必须通过迁移脚本完成，启动时不得静默丢弃
 - [模型性能分析](../references/oe-doc-3.7.0-s100-s600/guide/ptq/ptq_usage/performance_evaluation.html)
 - [hb_verifier](../references/oe-doc-3.7.0-s100-s600/guide/ptq/ptq_tool/hb_verifier.html)
 - [hrt_model_exec](../references/oe-doc-3.7.0-s100-s600/guide/ucp/runtime/tool_introduction/hrt_model_exec.html)
-

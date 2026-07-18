@@ -68,7 +68,7 @@ class CalibrationOptionsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     algorithm: Literal["default", "mix", "kl", "max"] = "default"
-    recipe: RecipeRequest = Field(default_factory=RecipeRequest)
+    recipe: RecipeRequest | None = None
 
 
 class ConversionRunRequest(BaseModel):
@@ -117,6 +117,7 @@ class CalibrationSetCreateRequest(BaseModel):
 
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=4000)
+    source_type: Literal["images", "npy"] = "images"
 
 
 def _services(request: Request) -> object:
@@ -353,6 +354,7 @@ async def create_calibration_set(
         project_id=project_id,
         name=payload.name,
         description=payload.description,
+        source_type=payload.source_type,
     )
 
 
@@ -379,6 +381,24 @@ async def upload_calibration_sample(
     )
 
 
+@router.post(
+    "/api/v1/calibration-versions/{version_id}/archives",
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_calibration_archive(
+    version_id: str,
+    request: Request,
+    filename: Annotated[str | None, Header(alias="X-Filename")] = None,
+    filename_b64: Annotated[str | None, Header(alias="X-Filename-B64")] = None,
+) -> dict[str, object]:
+    return await _services(request).catalog_service.upload_calibration_archive(
+        version_id=version_id,
+        filename=_upload_filename(filename, filename_b64),
+        content_length=_content_length(request),
+        chunks=request.stream(),
+    )
+
+
 @router.get(
     "/api/v1/calibration-versions/{version_id}/samples/{ordinal}/content"
 )
@@ -392,7 +412,9 @@ async def calibration_sample_content(
         path,
         media_type=metadata["mime_type"],
         filename=metadata["original_filename"],
-        content_disposition_type="inline",
+        content_disposition_type=(
+            "attachment" if metadata["mime_type"] == "application/x-npy" else "inline"
+        ),
     )
 
 

@@ -47,6 +47,8 @@ class ConversionInputs:
     calibration_manifest_path: str
     calibration_manifest_sha256: str
     calibration_sample_count: int
+    calibration_source_type: str
+    calibration_validation_report: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,7 +345,7 @@ class CatalogRepository:
             return self._serialize_model_version(row)
 
     def create_calibration_set(
-        self, *, project_id: str, name: str, description: str
+        self, *, project_id: str, name: str, description: str, source_type: str
     ) -> dict[str, Any]:
         calibration_set = CalibrationSet(
             id=str(uuid.uuid4()),
@@ -354,7 +356,7 @@ class CatalogRepository:
         version = CalibrationVersion(
             id=str(uuid.uuid4()),
             calibration_set=calibration_set,
-            source_type="images",
+            source_type=source_type,
             status="DRAFT",
         )
         with self._session_factory.begin() as session:
@@ -404,13 +406,18 @@ class CatalogRepository:
                 raise ValueError("calibration version is immutable after finalization")
             if len(version.samples) >= 100:
                 raise ValueError("calibration version cannot contain more than 100 samples")
-            asset, storage_reused = self._get_or_create_asset(session, "calibration", blob)
+            if (version.source_type == "npy") != (blob.mime_type == "application/x-npy"):
+                raise ValueError("calibration sample does not match the version source type")
+            asset, storage_reused = self._get_or_create_asset(
+                session, f"calibration-{version.source_type}", blob
+            )
             sample = CalibrationSample(
                 id=str(uuid.uuid4()),
                 calibration_version_id=version_id,
                 asset=asset,
                 ordinal=len(version.samples),
                 original_filename=original_filename,
+                validation=blob.validation,
             )
             session.add(sample)
             version.sample_count = len(version.samples) + 1
@@ -419,6 +426,57 @@ class CatalogRepository:
             payload = self._serialize_sample(sample)
             payload["storage_reused"] = storage_reused
             return payload
+
+    def add_calibration_samples(
+        self,
+        *,
+        version_id: str,
+        blobs: list[StoredBlob],
+    ) -> list[dict[str, Any]]:
+        if not blobs:
+            raise ValueError("at least one calibration sample is required")
+        with self._session_factory.begin() as session:
+            version = session.scalar(
+                select(CalibrationVersion)
+                .where(CalibrationVersion.id == version_id)
+                .options(
+                    selectinload(CalibrationVersion.samples),
+                    selectinload(CalibrationVersion.calibration_set),
+                )
+            )
+            if version is None:
+                raise KeyError(f"unknown calibration version: {version_id}")
+            if version.status != "DRAFT":
+                raise ValueError("calibration version is immutable after finalization")
+            if len(version.samples) + len(blobs) > 100:
+                raise ValueError("calibration version cannot contain more than 100 samples")
+            payloads: list[dict[str, Any]] = []
+            for offset, blob in enumerate(blobs):
+                if (version.source_type == "npy") != (
+                    blob.mime_type == "application/x-npy"
+                ):
+                    raise ValueError(
+                        "calibration sample does not match the version source type"
+                    )
+                asset, storage_reused = self._get_or_create_asset(
+                    session, f"calibration-{version.source_type}", blob
+                )
+                sample = CalibrationSample(
+                    id=str(uuid.uuid4()),
+                    calibration_version_id=version_id,
+                    asset=asset,
+                    ordinal=len(version.samples) + offset,
+                    original_filename=blob.display_name,
+                    validation=blob.validation,
+                )
+                session.add(sample)
+                session.flush()
+                payload = self._serialize_sample(sample)
+                payload["storage_reused"] = storage_reused
+                payloads.append(payload)
+            version.sample_count = len(version.samples) + len(blobs)
+            version.calibration_set.updated_at = datetime.now(UTC)
+            return payloads
 
     def get_calibration_version(self, version_id: str) -> dict[str, Any]:
         with self._session_factory() as session:
@@ -474,6 +532,7 @@ class CatalogRepository:
             return {
                 "id": row.id,
                 "status": row.status,
+                "source_type": row.source_type,
                 "samples": [
                     {
                         "id": sample.id,
@@ -483,6 +542,7 @@ class CatalogRepository:
                         "sha256": sample.asset.sha256,
                         "size_bytes": sample.asset.size_bytes,
                         "mime_type": sample.asset.mime_type,
+                        "validation": sample.validation,
                     }
                     for sample in row.samples
                 ],
@@ -563,6 +623,8 @@ class CatalogRepository:
                 calibration_manifest_path=calibration_version.manifest_key,
                 calibration_manifest_sha256=calibration_version.manifest_sha256,
                 calibration_sample_count=calibration_version.sample_count,
+                calibration_source_type=calibration_version.source_type,
+                calibration_validation_report=calibration_version.validation_report or {},
             )
 
     @staticmethod
@@ -726,6 +788,7 @@ class CatalogRepository:
             "id": row.id,
             "ordinal": row.ordinal,
             "original_filename": row.original_filename,
+            "validation": row.validation,
             "asset": {
                 "id": row.asset.id,
                 "sha256": row.asset.sha256,

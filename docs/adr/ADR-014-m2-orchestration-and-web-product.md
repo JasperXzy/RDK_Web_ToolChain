@@ -86,8 +86,8 @@ POST /api/v1/system/preflight/runner-smoke-test
   浏览器刷新不再丢失任务日志位置。
 - 项目删除可在没有活跃任务时级联删除终态 Run 目录和元数据；内容相同且仍被其他项目引用的
   Blob 保留。
-- M2 正式路径限定为 CPU Runner、单个静态四维 ONNX 输入和图片校准。直接 NPY/ZIP 校准
-  导入、多输入/动态 Shape、HBRuntime、`hb_verifier`、比较、GPU 和板端能力继续按后续阶段
-  实现。
+- M2 原始正式路径限定为 CPU Runner、单个四维 ONNX 输入和图片校准；直接 NPY 与 ZIP
+  导入已由 [ADR-015](./ADR-015-m2-1-calibration-and-release-gate.md) 在 M2.1 补齐。多输入、
+  HBRuntime、`hb_verifier`、比较、GPU 和板端能力继续按后续阶段实现。
 - CSRF 会话属于本机 Controller 进程；进程重启后页面会重新获取会话。产品仍不支持公网、
   多租户或任意网络暴露。

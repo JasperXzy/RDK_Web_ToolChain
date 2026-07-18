@@ -48,6 +48,7 @@ ERROR_ADVICE = {
     "TOOL_CHECK_FAILED": "查看 check.log 中的不支持算子和 Shape 约束。",
     "TOOL_COMPILE_FAILED": "查看 compile.log，并核对输入预处理和平台参数。",
     "CALIBRATION_INVALID_SAMPLE": "检查校准集数量、图片格式和 Recipe。",
+    "CALIBRATION_NPY_INVALID": "检查 NPY 的 Shape、dtype、字节序和有限数值。",
     "CALIBRATION_PREPROCESS_FAILED": "检查损坏图片、裁剪尺寸及归一化参数。",
     "RUN_TIMEOUT": "提高任务超时或减少校准样本后重试。",
     "RUN_RECOVERY_FAILED": "确认 Docker 可用后，以相同快照重试任务。",
@@ -115,6 +116,7 @@ def _verify_catalog_assets(
     calibration: Path | None = None,
     manifest_path: Path | None = None,
     expected_manifest_sha256: str | None = None,
+    expected_source_type: str | None = None,
 ) -> None:
     if not model.is_file() or model.is_symlink():
         raise ValueError("catalog model asset must reference a regular file")
@@ -143,6 +145,8 @@ def _verify_catalog_assets(
     ):
         raise ValueError("calibration manifest hash does not match its registered version")
     samples = manifest.get("samples")
+    if manifest.get("source_type") != expected_source_type:
+        raise ValueError("calibration manifest source type does not match its catalog version")
     if not isinstance(samples, list) or manifest.get("sample_count") != len(samples):
         raise ValueError("calibration manifest sample count is invalid")
     expected_files: dict[str, dict[str, Any]] = {}
@@ -298,6 +302,7 @@ class RunService:
             "model_sha256": inputs.model_sha256,
             "calibration_manifest_sha256": inputs.calibration_manifest_sha256,
             "calibration_sample_count": inputs.calibration_sample_count,
+            "calibration_source_type": inputs.calibration_source_type,
         }
         return preview
 
@@ -385,6 +390,7 @@ class RunService:
             calibration=calibration,
             manifest_path=calibration_manifest,
             expected_manifest_sha256=inputs.calibration_manifest_sha256,
+            expected_source_type=inputs.calibration_source_type,
         )
         output_prefix = str(options["output_prefix"])
         if not OUTPUT_PREFIX.fullmatch(output_prefix):
@@ -408,6 +414,8 @@ class RunService:
                 "cache_mode": options.get("cache_mode", "disable"),
             },
             sample_count=inputs.calibration_sample_count,
+            calibration_source_type=inputs.calibration_source_type,
+            calibration_validation_report=inputs.calibration_validation_report,
         )
         return inputs, configuration
 

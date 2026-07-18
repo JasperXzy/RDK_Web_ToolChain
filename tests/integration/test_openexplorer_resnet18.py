@@ -56,6 +56,7 @@ def _configuration(profile_id: str, output_prefix: str) -> dict[str, object]:
             }
         ],
         "calibration": {
+            "source_type": "images",
             "algorithm": "default",
             "sample_limit": 20,
             "recipe": {

@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import uuid
 import zipfile
 
+import numpy as np
 import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 from rdkwt_controller.api.routes import ConversionRunRequest
 from rdkwt_controller.application import CatalogError
+from rdkwt_controller.infrastructure.db import CalibrationSample
 from rdkwt_controller.main import create_app
+from sqlalchemy import update
 
 PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -20,6 +24,22 @@ PNG_1X1 = base64.b64decode(
 
 async def _chunks(payload: bytes):
     yield payload
+
+
+def _npy_bytes(
+    *, shape: tuple[int, ...] = (3, 2, 2), value: float = 0.0, dtype=np.float32
+) -> bytes:
+    output = io.BytesIO()
+    np.save(output, np.full(shape, value, dtype=dtype), allow_pickle=False)
+    return output.getvalue()
+
+
+def _zip_bytes(entries: list[tuple[str, bytes]]) -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, payload in entries:
+            archive.writestr(name, payload)
+    return output.getvalue()
 
 
 async def _prepare_catalog(app):
@@ -127,6 +147,8 @@ def test_health_profiles_and_preflight(settings) -> None:
 
     assert index.status_code == 200
     assert "六步转换向导" in index.text
+    assert "直接 NPY" in index.text
+    assert "导入 ZIP" in index.text
     assert "frame-ancestors 'none'" in index.headers["content-security-policy"]
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
@@ -333,6 +355,305 @@ def test_calibration_finalize_rolls_back_materialization_on_metadata_failure(
 
     assert not (settings.assets_dir / "calibration-sets" / version_id).exists()
     assert service.get_calibration_version(version_id)["status"] == "DRAFT"
+
+
+def test_image_finalize_revalidates_samples_created_before_m2_1(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    service = app.state.services.catalog_service
+    project = service.create_project(name="Upgrade", description="")
+    calibration_set = service.create_calibration_set(
+        project_id=project["id"], name="Legacy draft", description=""
+    )
+    version_id = calibration_set["versions"][0]["id"]
+    asyncio.run(
+        service.upload_calibration_sample(
+            version_id=version_id,
+            filename="legacy.png",
+            content_length=len(PNG_1X1),
+            chunks=_chunks(PNG_1X1),
+        )
+    )
+    with service.repository._session_factory.begin() as session:
+        session.execute(
+            update(CalibrationSample)
+            .where(CalibrationSample.calibration_version_id == version_id)
+            .values(validation=None)
+        )
+
+    finalized = service.finalize_calibration_version(version_id)
+    manifest = json.loads(
+        (settings.assets_dir / "calibration-sets" / version_id / "manifest.json").read_text()
+    )
+
+    assert finalized["status"] == "READY"
+    assert manifest["samples"][0]["validation"] == {
+        "format": "image",
+        "mime_type": "image/png",
+    }
+
+
+def test_npy_archive_import_validates_and_freezes_metadata(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    service = app.state.services.catalog_service
+    project = service.create_project(name="Direct NPY", description="M2.1")
+    calibration_set = service.create_calibration_set(
+        project_id=project["id"],
+        name="Preprocessed tensors",
+        description="",
+        source_type="npy",
+    )
+    version_id = calibration_set["versions"][0]["id"]
+    first_payload = _npy_bytes(value=1.0)
+    first = asyncio.run(
+        service.upload_calibration_sample(
+            version_id=version_id,
+            filename="sample-00.npy",
+            content_length=len(first_payload),
+            chunks=_chunks(first_payload),
+        )
+    )
+    archive_payload = _zip_bytes(
+        [
+            (f"nested/sample-{index:02d}.npy", _npy_bytes(value=float(index)))
+            for index in range(1, 20)
+        ]
+    )
+    imported = asyncio.run(
+        service.upload_calibration_archive(
+            version_id=version_id,
+            filename="calibration.zip",
+            content_length=len(archive_payload),
+            chunks=_chunks(archive_payload),
+        )
+    )
+    finalized = service.finalize_calibration_version(version_id)
+    manifest = json.loads(
+        (settings.assets_dir / "calibration-sets" / version_id / "manifest.json").read_text()
+    )
+
+    assert first["validation"]["shape"] == [3, 2, 2]
+    assert first["validation"]["dtype"] == "float32"
+    assert imported["imported_count"] == 19
+    assert [item["ordinal"] for item in imported["samples"]] == list(range(1, 20))
+    assert finalized["source_type"] == "npy"
+    assert finalized["sample_count"] == 20
+    assert finalized["validation_report"]["shape"] == [3, 2, 2]
+    assert finalized["validation_report"]["dtype"] == "float32"
+    assert finalized["validation_report"]["first_sample_statistics"]["mean"] == 1.0
+    assert manifest["source_type"] == "npy"
+    assert all(item["materialized_name"].endswith(".npy") for item in manifest["samples"])
+
+
+def test_npy_import_rejects_unsafe_zip_and_inconsistent_shapes(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    service = app.state.services.catalog_service
+    project = service.create_project(name="NPY rejection", description="M2.1")
+    unsafe = service.create_calibration_set(
+        project_id=project["id"], name="Unsafe", description="", source_type="npy"
+    )
+    unsafe_version = unsafe["versions"][0]["id"]
+    unsafe_zip = _zip_bytes([("../escape.npy", _npy_bytes())])
+    with pytest.raises(CatalogError) as unsafe_error:
+        asyncio.run(
+            service.upload_calibration_archive(
+                version_id=unsafe_version,
+                filename="unsafe.zip",
+                content_length=len(unsafe_zip),
+                chunks=_chunks(unsafe_zip),
+            )
+        )
+    assert unsafe_error.value.code == "CALIBRATION_ARCHIVE_PATH_INVALID"
+    assert service.get_calibration_version(unsafe_version)["sample_count"] == 0
+
+    corrupt = service.create_calibration_set(
+        project_id=project["id"], name="Corrupt", description="", source_type="npy"
+    )
+    corrupt_version = corrupt["versions"][0]["id"]
+    corrupt_zip = _zip_bytes(
+        [("00-valid.npy", _npy_bytes()), ("01-corrupt.npy", b"not-an-npy")]
+    )
+    with pytest.raises(CatalogError) as corrupt_error:
+        asyncio.run(
+            service.upload_calibration_archive(
+                version_id=corrupt_version,
+                filename="corrupt.zip",
+                content_length=len(corrupt_zip),
+                chunks=_chunks(corrupt_zip),
+            )
+        )
+    assert corrupt_error.value.code == "CALIBRATION_FORMAT_INVALID"
+    assert service.get_calibration_version(corrupt_version)["sample_count"] == 0
+    assert list((settings.assets_dir / "blobs" / "sha256").glob("*/*")) == []
+    assert list((settings.assets_dir / "upload-staging").iterdir()) == []
+
+    inconsistent = service.create_calibration_set(
+        project_id=project["id"],
+        name="Inconsistent",
+        description="",
+        source_type="npy",
+    )
+    inconsistent_version = inconsistent["versions"][0]["id"]
+    for index, shape in enumerate(((3, 2, 2), (3, 3, 3))):
+        payload = _npy_bytes(shape=shape)
+        asyncio.run(
+            service.upload_calibration_sample(
+                version_id=inconsistent_version,
+                filename=f"sample-{index}.npy",
+                content_length=len(payload),
+                chunks=_chunks(payload),
+            )
+        )
+    with pytest.raises(CatalogError) as inconsistent_error:
+        service.finalize_calibration_version(inconsistent_version)
+    assert inconsistent_error.value.code == "CALIBRATION_NPY_INCONSISTENT"
+    assert service.get_calibration_version(inconsistent_version)["status"] == "DRAFT"
+    assert not (settings.assets_dir / "calibration-sets" / inconsistent_version).exists()
+
+
+def test_npy_import_rejects_object_arrays(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    service = app.state.services.catalog_service
+    project = service.create_project(name="Object NPY", description="M2.1")
+    calibration_set = service.create_calibration_set(
+        project_id=project["id"], name="Object", description="", source_type="npy"
+    )
+    version_id = calibration_set["versions"][0]["id"]
+    output = io.BytesIO()
+    np.save(output, np.asarray([{"unsafe": True}], dtype=object), allow_pickle=True)
+    payload = output.getvalue()
+    with pytest.raises(CatalogError) as captured:
+        asyncio.run(
+            service.upload_calibration_sample(
+                version_id=version_id,
+                filename="object.npy",
+                content_length=len(payload),
+                chunks=_chunks(payload),
+            )
+        )
+    assert captured.value.code == "CALIBRATION_NPY_INVALID"
+
+
+def test_npy_import_rejects_unrepresentable_statistics(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    service = app.state.services.catalog_service
+    project = service.create_project(name="Extreme NPY", description="M2.1")
+    calibration_set = service.create_calibration_set(
+        project_id=project["id"], name="Extreme", description="", source_type="npy"
+    )
+    version_id = calibration_set["versions"][0]["id"]
+    payload = _npy_bytes(shape=(2,), value=1e308, dtype=np.float64)
+
+    with pytest.raises(CatalogError) as captured:
+        asyncio.run(
+            service.upload_calibration_sample(
+                version_id=version_id,
+                filename="extreme.npy",
+                content_length=len(payload),
+                chunks=_chunks(payload),
+            )
+        )
+    assert captured.value.code == "CALIBRATION_NPY_STATISTICS_UNREPRESENTABLE"
+
+
+def test_direct_npy_conversion_normalizes_without_image_recipe(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    project, model, _image_calibration = asyncio.run(_prepare_catalog(app))
+    dynamic_inspection = dict(model["inspection"])
+    dynamic_inspection["inputs"] = [
+        {
+            "name": "data",
+            "shape": ["N", 3, "H", "W"],
+            "dtype": "FLOAT",
+            "dynamic": True,
+        }
+    ]
+    model = app.state.services.catalog_service.repository.set_model_inspection(
+        model["id"],
+        run_id=str(uuid.uuid4()),
+        status="READY",
+        inspection=dynamic_inspection,
+    )
+    service = app.state.services.catalog_service
+    calibration_set = service.create_calibration_set(
+        project_id=project["id"], name="Direct", description="", source_type="npy"
+    )
+    version_id = calibration_set["versions"][0]["id"]
+    archive_payload = _zip_bytes(
+        [
+            (f"sample-{index:02d}.npy", _npy_bytes(shape=(3, 2, 2), value=index))
+            for index in range(20)
+        ]
+    )
+    asyncio.run(
+        service.upload_calibration_archive(
+            version_id=version_id,
+            filename="direct.zip",
+            content_length=len(archive_payload),
+            chunks=_chunks(archive_payload),
+        )
+    )
+    calibration = service.finalize_calibration_version(version_id)
+
+    preview = app.state.services.run_service.preview_conversion(
+        profile_id="s100-oe-3.7.0",
+        model_version_id=model["id"],
+        calibration_version_id=calibration["id"],
+        output_prefix="direct_npy",
+        core_num=1,
+        max_l2m_size=0,
+        compile_mode="latency",
+        balance_factor=None,
+        optimize_level="O2",
+        sample_limit=20,
+        jobs=8,
+        input_options={"target_shape": [1, 3, 2, 2]},
+    )
+
+    assert preview["configuration"]["calibration"]["source_type"] == "npy"
+    assert preview["configuration"]["calibration"]["recipe"] is None
+
+
+def test_direct_npy_conversion_requires_batch_free_model_shape(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    project, model, _image_calibration = asyncio.run(_prepare_catalog(app))
+    service = app.state.services.catalog_service
+    calibration_set = service.create_calibration_set(
+        project_id=project["id"],
+        name="Wrong Shape",
+        description="",
+        source_type="npy",
+    )
+    version_id = calibration_set["versions"][0]["id"]
+    archive_payload = _zip_bytes(
+        [
+            (f"sample-{index:02d}.npy", _npy_bytes(shape=(3, 2, 2)))
+            for index in range(20)
+        ]
+    )
+    asyncio.run(
+        service.upload_calibration_archive(
+            version_id=version_id,
+            filename="wrong-shape.zip",
+            content_length=len(archive_payload),
+            chunks=_chunks(archive_payload),
+        )
+    )
+    calibration = service.finalize_calibration_version(version_id)
+
+    with pytest.raises(ValueError, match="batch-free model input Shape"):
+        app.state.services.run_service.preview_conversion(
+            profile_id="s100-oe-3.7.0",
+            model_version_id=model["id"],
+            calibration_version_id=calibration["id"],
+            output_prefix="wrong_shape",
+            core_num=1,
+            max_l2m_size=0,
+            compile_mode="latency",
+            balance_factor=None,
+            optimize_level="O2",
+            sample_limit=20,
+            jobs=8,
+        )
 
 
 def test_project_delete_requires_confirmation_and_preserves_shared_blob(settings) -> None:

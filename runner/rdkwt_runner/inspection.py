@@ -84,11 +84,11 @@ def inspect_onnx(model_path: Path) -> dict[str, Any]:
     default_opset = next(
         (item["version"] for item in opsets if item["domain"] == "ai.onnx"), None
     )
-    if default_opset is None or not 10 <= default_opset <= 19:
+    if default_opset is None or not 8 <= default_opset <= 19:
         blockers.append(
             {
                 "code": "MODEL_OPSET_UNSUPPORTED",
-                "message": f"ai.onnx opset must be between 10 and 19; found {default_opset}",
+                "message": f"ai.onnx opset must be between 8 and 19; found {default_opset}",
             }
         )
     if len(inputs) != 1:

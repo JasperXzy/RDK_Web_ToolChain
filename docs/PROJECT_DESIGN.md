@@ -2148,6 +2148,24 @@ docker compose up -d
 显式 OpenExplorer Golden；状态机、恢复边界与 Web 安全决策见
 [ADR-014：M2 持久任务编排与 Web 产品闭环](./adr/ADR-014-m2-orchestration-and-web-product.md)。
 
+### M2.1：发布加固与校准输入补齐
+
+交付：
+
+- 校准版本冻结 `images` / `npy` 源类型。
+- 直接 NPY 单文件上传、严格安全校验、Shape/dtype 一致性与模型输入联动。
+- 图片或 NPY 的 ZIP 原子批量导入、路径/压缩/容量防护与版本登记全量失败回滚。
+- 图片 Recipe 与直接 NPY 的 Controller、Runner、Web 双路径。
+- 真实 ResNet18 opset 8～19 兼容边界，以及 Controller 级 S100/S600 发布门禁。
+
+退出条件：本地单元/静态检查与 Docker 合约测试通过；完整 Controller 资产流程可用官方
+ResNet18 和 20 份 ImageNet 样本依次生成 `nash-e`/单 Core 与 `nash-p`/双 Core HBM，且
+产物下载、哈希和可复现导出全部通过。
+
+实施状态（2026-07-19）：M2.1 已完成。发布门禁一次完整执行用时 7 分 40 秒；详细决策与
+复跑方法见 [ADR-015](./adr/ADR-015-m2-1-calibration-and-release-gate.md) 和
+[M2.1 发布检查表](./M2_1_RELEASE_CHECKLIST.md)。
+
 ### M3：验证、比较与 GPU
 
 交付：
