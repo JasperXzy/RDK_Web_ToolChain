@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
+import pytest
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
+from rdkwt_controller.api.routes import ConversionRunRequest
 from rdkwt_controller.main import create_app
 
 
@@ -68,3 +72,75 @@ def test_probe_rejects_missing_asset_before_docker(settings) -> None:
 
     response = asyncio.run(exercise_app())
     assert response.status_code == 422
+
+
+def test_conversion_submission_writes_normalized_s600_request(settings) -> None:
+    model = settings.assets_dir / "models" / "resnet18.onnx"
+    calibration = settings.assets_dir / "calibration" / "imagenet"
+    model.parent.mkdir(parents=True)
+    calibration.mkdir(parents=True)
+    model.write_bytes(b"model-placeholder")
+    app = create_app(settings, docker_client=FakeDockerClient())
+
+    submission = app.state.services.run_service.submit_conversion(
+        profile_id="s600-oe-3.7.0",
+        model_path="models/resnet18.onnx",
+        calibration_path="calibration/imagenet",
+        output_prefix="resnet18_s600",
+        core_num=2,
+        max_l2m_size="auto",
+        compile_mode="latency",
+        balance_factor=None,
+        optimize_level="O2",
+        sample_limit=100,
+        jobs=8,
+    )
+    request_path = (
+        settings.runs_dir
+        / submission.run_id
+        / "attempts"
+        / str(submission.attempt)
+        / "request.json"
+    )
+    request = json.loads(request_path.read_text())
+
+    assert request["adapter"] == "openexplorer-3.7.0"
+    assert request["configuration"]["target_profile"]["profile"]["march"] == "nash-p"
+    assert request["configuration"]["compiler"]["core_num"] == 2
+    assert request["configuration"]["compiler"]["max_l2m_size"] == "auto"
+
+
+def test_conversion_submission_rejects_s100_dual_core(settings) -> None:
+    model = settings.assets_dir / "models" / "resnet18.onnx"
+    calibration = settings.assets_dir / "calibration" / "imagenet"
+    model.parent.mkdir(parents=True)
+    calibration.mkdir(parents=True)
+    model.write_bytes(b"model-placeholder")
+    app = create_app(settings, docker_client=FakeDockerClient())
+
+    with pytest.raises(ValueError, match="core_num"):
+        app.state.services.run_service.submit_conversion(
+            profile_id="s100-oe-3.7.0",
+            model_path="models/resnet18.onnx",
+            calibration_path="calibration/imagenet",
+            output_prefix="resnet18_s100",
+            core_num=2,
+            max_l2m_size=0,
+            compile_mode="latency",
+            balance_factor=None,
+            optimize_level="O2",
+            sample_limit=100,
+            jobs=8,
+        )
+
+
+def test_conversion_request_rejects_boolean_integer_fields() -> None:
+    with pytest.raises(ValidationError):
+        ConversionRunRequest.model_validate(
+            {
+                "profile_id": "s100-oe-3.7.0",
+                "model_path": "models/resnet18.onnx",
+                "calibration_path": "calibration/imagenet",
+                "core_num": True,
+            }
+        )

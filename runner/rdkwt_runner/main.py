@@ -7,11 +7,13 @@ import signal
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .adapters import AdapterExecutionError, OpenExplorer370Adapter
 from .filesystem import atomic_write_json, resolve_within, sha256_file
 from .probe import check_toolchain, inspect_asset, toolchain_versions
 
@@ -84,9 +86,13 @@ def _validate_request(payload: Any) -> dict[str, Any]:
     if payload["contract_version"] != CONTRACT_VERSION:
         raise ValueError(f"unsupported contract version: {payload['contract_version']!r}")
     run_id = str(uuid.UUID(str(payload["run_id"])))
-    if not isinstance(payload["attempt"], int) or payload["attempt"] < 1:
+    if (
+        isinstance(payload["attempt"], bool)
+        or not isinstance(payload["attempt"], int)
+        or payload["attempt"] < 1
+    ):
         raise ValueError("attempt must be a positive integer")
-    if payload["adapter"] != "contract-probe-1.0":
+    if payload["adapter"] not in {"contract-probe-1.0", "openexplorer-3.7.0"}:
         raise ValueError(f"unsupported adapter: {payload['adapter']!r}")
     if payload["runner_mode"] != "cpu":
         raise ValueError("the CPU Runner only accepts runner_mode=cpu")
@@ -97,6 +103,14 @@ def _validate_request(payload: Any) -> dict[str, Any]:
         raise ValueError("pipeline contains unsupported steps")
     if "collect" not in pipeline:
         raise ValueError("pipeline must include collect")
+    if payload["adapter"] == "openexplorer-3.7.0" and pipeline != [
+        "inspect",
+        "check",
+        "preprocess",
+        "compile",
+        "collect",
+    ]:
+        raise ValueError("the OpenExplorer 3.7.0 M1 adapter requires the complete ordered pipeline")
     paths = payload["paths"]
     expected_paths = {"model", "calibration_source", "attempt_root"}
     if not isinstance(paths, dict) or set(paths) != expected_paths:
@@ -104,14 +118,24 @@ def _validate_request(payload: Any) -> dict[str, Any]:
     expected_attempt_root = f"{run_id}/attempts/{payload['attempt']}"
     if paths["attempt_root"] != expected_attempt_root:
         raise ValueError("attempt_root does not match run_id and attempt")
+    if payload["adapter"] == "openexplorer-3.7.0" and paths["calibration_source"] is None:
+        raise ValueError("the OpenExplorer adapter requires calibration_source")
     if not isinstance(payload["configuration"], dict):
         raise ValueError("configuration must be an object")
     limits = payload["limits"]
     if not isinstance(limits, dict) or set(limits) != {"timeout_seconds", "max_log_bytes"}:
         raise ValueError("limits must contain timeout_seconds and max_log_bytes")
-    if not isinstance(limits["timeout_seconds"], int) or limits["timeout_seconds"] < 1:
+    if (
+        isinstance(limits["timeout_seconds"], bool)
+        or not isinstance(limits["timeout_seconds"], int)
+        or limits["timeout_seconds"] < 1
+    ):
         raise ValueError("timeout_seconds must be a positive integer")
-    if not isinstance(limits["max_log_bytes"], int) or not 1024 <= limits["max_log_bytes"] <= 2**30:
+    if (
+        isinstance(limits["max_log_bytes"], bool)
+        or not isinstance(limits["max_log_bytes"], int)
+        or not 1024 <= limits["max_log_bytes"] <= 2**30
+    ):
         raise ValueError("max_log_bytes must be between 1024 and 1073741824")
     return payload
 
@@ -157,10 +181,18 @@ def execute_request(payload: dict[str, Any], assets_root: Path, runs_root: Path)
     attempt_root = resolve_within(runs_root, request["paths"]["attempt_root"])
     attempt_root.mkdir(parents=True, exist_ok=True)
     model_path = resolve_within(assets_root, request["paths"]["model"], must_exist=True)
+    calibration_path = None
+    if request["paths"]["calibration_source"] is not None:
+        calibration_path = resolve_within(
+            assets_root,
+            request["paths"]["calibration_source"],
+            must_exist=True,
+        )
     events = EventWriter(attempt_root / "events.jsonl")
     started_at = utc_now()
     steps: list[dict[str, Any]] = []
     metrics: dict[str, Any] = {}
+    openexplorer_adapter: OpenExplorer370Adapter | None = None
 
     events.emit(
         level="info",
@@ -171,14 +203,27 @@ def execute_request(payload: dict[str, Any], assets_root: Path, runs_root: Path)
         progress=0,
     )
 
-    operations: dict[str, Callable[[], dict[str, Any]]] = {
-        "inspect": lambda: inspect_asset(model_path),
-        "check": lambda: check_toolchain(request["limits"]["timeout_seconds"]),
-    }
-
     try:
+        if request["adapter"] == "openexplorer-3.7.0":
+            assert calibration_path is not None
+            openexplorer_adapter = OpenExplorer370Adapter(
+                request=request,
+                model_path=model_path,
+                calibration_source=calibration_path,
+                attempt_root=attempt_root,
+                is_cancel_requested=lambda: _cancel_requested,
+            )
+            operations = {
+                step: lambda step=step: openexplorer_adapter.run_step(step)
+                for step in openexplorer_adapter.implemented_steps
+            }
+        else:
+            operations = {
+                "inspect": lambda: inspect_asset(model_path),
+                "check": lambda: check_toolchain(request["limits"]["timeout_seconds"]),
+            }
         for step in request["pipeline"]:
-            if step in {"preprocess", "compile", "verify"}:
+            if step not in operations and step != "collect":
                 now = utc_now()
                 events.emit(
                     level="info",
@@ -213,28 +258,32 @@ def execute_request(payload: dict[str, Any], assets_root: Path, runs_root: Path)
             code="COLLECT_STARTED",
             message="collect started",
         )
-        artifact_path = attempt_root / "artifacts" / "probe.json"
-        artifact_payload = {
-            "adapter": request["adapter"],
-            "python": platform.python_version(),
-            "runner_version": __version__,
-            "toolchain_versions": toolchain_versions(),
-            "metrics": metrics,
-        }
-        atomic_write_json(artifact_path, artifact_payload)
-        manifest = {
-            "schema_version": "1",
-            "artifacts": [
-                {
-                    "kind": "runner_probe",
-                    "relative_path": "artifacts/probe.json",
-                    "size_bytes": artifact_path.stat().st_size,
-                    "sha256": sha256_file(artifact_path),
-                    "mime_type": "application/json",
-                    "required": True,
-                }
-            ],
-        }
+        if openexplorer_adapter is None:
+            artifact_path = attempt_root / "artifacts" / "probe.json"
+            artifact_payload = {
+                "adapter": request["adapter"],
+                "python": platform.python_version(),
+                "runner_version": __version__,
+                "toolchain_versions": toolchain_versions(),
+                "metrics": metrics,
+            }
+            atomic_write_json(artifact_path, artifact_payload)
+            manifest = {
+                "schema_version": "1",
+                "artifacts": [
+                    {
+                        "kind": "runner_probe",
+                        "relative_path": "artifacts/probe.json",
+                        "size_bytes": artifact_path.stat().st_size,
+                        "sha256": sha256_file(artifact_path),
+                        "mime_type": "application/json",
+                        "required": True,
+                    }
+                ],
+            }
+            collect_details = {"artifact_count": 1}
+        else:
+            manifest, collect_details = openexplorer_adapter.collect(require_hbm=True)
         atomic_write_json(attempt_root / "artifact-manifest.json", manifest)
         collect_finished = utc_now()
         steps.append(
@@ -244,7 +293,7 @@ def execute_request(payload: dict[str, Any], assets_root: Path, runs_root: Path)
                 "started_at": collect_started,
                 "finished_at": collect_finished,
                 "duration_ms": max(0, (time.monotonic_ns() - collect_started_ns) // 1_000_000),
-                "details": {"artifact_count": 1},
+                "details": collect_details,
             }
         )
         events.emit(
@@ -281,7 +330,16 @@ def execute_request(payload: dict[str, Any], assets_root: Path, runs_root: Path)
     except BaseException as exc:
         cancelled = isinstance(exc, InterruptedError)
         status = "cancelled" if cancelled else "failed"
-        error_code = "RUNNER_CANCELLED" if cancelled else "RUNNER_FAILED"
+        adapter_error = exc if isinstance(exc, AdapterExecutionError) else None
+        error_code = (
+            "RUNNER_CANCELLED"
+            if cancelled
+            else adapter_error.code
+            if adapter_error is not None
+            else "RUNNER_FAILED"
+        )
+        error_step = None if adapter_error is None else adapter_error.step
+        error_details = {} if adapter_error is None else adapter_error.details
         result = {
             "contract_version": CONTRACT_VERSION,
             "run_id": request["run_id"],
@@ -293,12 +351,21 @@ def execute_request(payload: dict[str, Any], assets_root: Path, runs_root: Path)
             "toolchain_versions": toolchain_versions(),
             "metrics": metrics,
             "warnings": [],
-            "error": {"code": error_code, "message": str(exc), "step": None, "details": {}},
+            "error": {
+                "code": error_code,
+                "message": str(exc),
+                "step": error_step,
+                "details": error_details,
+            },
             "artifact_manifest": "artifact-manifest.json",
         }
         manifest_path = attempt_root / "artifact-manifest.json"
         if not manifest_path.exists():
-            atomic_write_json(manifest_path, {"schema_version": "1", "artifacts": []})
+            manifest = {"schema_version": "1", "artifacts": []}
+            if openexplorer_adapter is not None:
+                with suppress(BaseException):
+                    manifest, _details = openexplorer_adapter.collect(require_hbm=False)
+            atomic_write_json(manifest_path, manifest)
         atomic_write_json(attempt_root / "result.json", result)
         events.emit(
             level="warning" if cancelled else "error",

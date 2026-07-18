@@ -41,12 +41,18 @@ def resolve_within(root: Path, logical_path: str, *, must_exist: bool = False) -
 
 
 def atomic_write_json(path: Path, payload: Any) -> None:
+    atomic_write_text(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+
+
+def atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
+            handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)

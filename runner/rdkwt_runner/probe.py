@@ -43,6 +43,8 @@ def check_toolchain(timeout_seconds: int) -> dict[str, Any]:
 
 def toolchain_versions() -> dict[str, str]:
     return {
+        "openexplorer": "3.7.0",
         "hmct": _distribution_version("hmct"),
-        "hbdk4_compiler": _distribution_version("hbdk4_compiler"),
+        "hbdk": _distribution_version("hbdk4_compiler"),
+        "hb_compile": _distribution_version("horizon_tc_ui"),
     }

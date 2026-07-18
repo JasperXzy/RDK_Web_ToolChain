@@ -119,3 +119,41 @@ def test_runner_rejects_symlink_request_file(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="escapes runs root"):
         run_request_file(request_link, assets, runs)
+
+
+def test_runner_writes_failed_result_when_adapter_configuration_is_invalid(
+    tmp_path: Path,
+) -> None:
+    assets = tmp_path / "assets"
+    runs = tmp_path / "runs"
+    model = assets / "models" / "model.onnx"
+    calibration = assets / "calibration"
+    model.parent.mkdir(parents=True)
+    calibration.mkdir()
+    model.write_bytes(b"invalid-model-is-not-reached")
+    runs.mkdir()
+    run_id = str(uuid.uuid4())
+    request = {
+        "contract_version": "1.0",
+        "run_id": run_id,
+        "attempt": 1,
+        "adapter": "openexplorer-3.7.0",
+        "runner_mode": "cpu",
+        "pipeline": ["inspect", "check", "preprocess", "compile", "collect"],
+        "paths": {
+            "model": "models/model.onnx",
+            "calibration_source": "calibration",
+            "attempt_root": f"{run_id}/attempts/1",
+        },
+        "configuration": {},
+        "limits": {"timeout_seconds": 30, "max_log_bytes": 1_048_576},
+    }
+
+    with pytest.raises(RuntimeError, match="invalid normalized configuration"):
+        execute_request(request, assets, runs)
+
+    result_path = runs / run_id / "attempts" / "1" / "result.json"
+    result = json.loads(result_path.read_text())
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "CONFIG_INVALID"
+    assert result["error"]["step"] == "runner"

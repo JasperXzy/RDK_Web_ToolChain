@@ -1,0 +1,16 @@
+{
+  "summary": {
+    "model info": {
+      "BPU core number": 1,
+      "BPU march": "nash-e"
+    },
+    "performance": {
+      "FPS": 2433.29,
+      "latency (us)": 411
+    },
+    "DDR access data": {
+      "DDR bytes per run": 12173312,
+      "min memory requirement": 12315968
+    }
+  }
+}

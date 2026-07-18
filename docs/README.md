@@ -7,6 +7,7 @@
 - [产品需求文档（PRD）](./PRD.md)：定义产品目标、用户流程、功能范围、优先级、非功能要求和验收标准。
 - [项目设计文档](./PROJECT_DESIGN.md)：定义本地部署架构、Docker 调度方式、组件职责、数据模型、API、任务协议、安全边界、测试和实施方案。
 - [ADR-011](./adr/ADR-011-runner-runtime-boundary.md)：记录 M0 Runner 运行时、Named Volume 与受限容器 Spike 结论。
+- [ADR-012](./adr/ADR-012-openexplorer-3.7-m1-baseline.md)：记录 M1 ResNet18 S100/S600 真实校准编译基线与 Adapter 决策。
 
 ## 已确认的核心决策
 

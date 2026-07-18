@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ from rdkwt_controller.infrastructure.db import Attempt, ConversionRun, RunReposi
 from rdkwt_controller.infrastructure.docker import DockerGateway
 from rdkwt_controller.profiles import ProfileRegistry
 from rdkwt_controller.settings import Settings
+
+OUTPUT_PREFIX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,10 +88,10 @@ class RunService:
         if not asset.is_file():
             raise ValueError("probe asset must be a regular file")
 
+        profile_snapshot = profile.snapshot()
         run_id = str(uuid.uuid4())
         attempt_number = 1
         attempt_root = f"{run_id}/attempts/{attempt_number}"
-        profile_snapshot = profile.snapshot()
         request = {
             "contract_version": "1.0",
             "run_id": run_id,
@@ -107,20 +110,168 @@ class RunService:
                 "max_log_bytes": self._settings.max_log_bytes,
             },
         }
+        return self._persist_submission(
+            run_id=run_id,
+            attempt=attempt_number,
+            profile_id=profile.profile_id,
+            profile_sha256=profile_snapshot["sha256"],
+            request=request,
+        )
+
+    def submit_conversion(
+        self,
+        *,
+        profile_id: str,
+        model_path: str,
+        calibration_path: str,
+        output_prefix: str,
+        core_num: int | None,
+        max_l2m_size: int | str | None,
+        compile_mode: str,
+        balance_factor: int | None,
+        optimize_level: str,
+        sample_limit: int,
+        jobs: int,
+    ) -> RunSubmission:
+        profile = self._profiles.get(profile_id)
+        try:
+            model = _resolve_within(self._settings.assets_dir, model_path, must_exist=True)
+            calibration = _resolve_within(
+                self._settings.assets_dir, calibration_path, must_exist=True
+            )
+        except FileNotFoundError as exc:
+            raise ValueError("model or calibration asset does not exist") from exc
+        if not model.is_file() or model.suffix.lower() != ".onnx":
+            raise ValueError("model_path must reference a regular ONNX file")
+        if not calibration.is_dir():
+            raise ValueError("calibration_path must reference a directory")
+        if not OUTPUT_PREFIX.fullmatch(output_prefix):
+            raise ValueError("output_prefix contains unsupported characters")
+        if isinstance(sample_limit, bool) or not 20 <= sample_limit <= 100:
+            raise ValueError("sample_limit must be between 20 and 100")
+        if isinstance(jobs, bool) or not 1 <= jobs <= 128:
+            raise ValueError("jobs must be between 1 and 128")
+        resolved_core_num = (
+            int(profile.capabilities.core_num.default) if core_num is None else core_num
+        )
+        resolved_l2m = profile.capabilities.max_l2m_size.default
+        if max_l2m_size is not None:
+            resolved_l2m = max_l2m_size
+        if isinstance(resolved_core_num, bool) or isinstance(resolved_l2m, bool):
+            raise ValueError("core_num and max_l2m_size must not be booleans")
+        profile.validate_compile_options(
+            core_num=resolved_core_num,
+            max_l2m_size=resolved_l2m,
+        )
+        if compile_mode not in profile.capabilities.compile_mode.allowed:
+            raise ValueError(f"compile_mode={compile_mode!r} is not supported by {profile_id}")
+        if optimize_level not in profile.capabilities.optimize_level.allowed:
+            raise ValueError(f"optimize_level={optimize_level!r} is not supported by {profile_id}")
+        if compile_mode == "balance":
+            if (
+                isinstance(balance_factor, bool)
+                or not isinstance(balance_factor, int)
+                or not 0 <= balance_factor <= 100
+            ):
+                raise ValueError("balance compile mode requires balance_factor from 0 to 100")
+        elif balance_factor is not None:
+            raise ValueError("balance_factor is only valid for balance compile mode")
+
+        profile_snapshot = profile.snapshot()
+        configuration = {
+            "schema_version": "1",
+            "target_profile": profile_snapshot,
+            "output_prefix": output_prefix,
+            "inputs": [
+                {
+                    "name": "data",
+                    "target_shape": [1, 3, 224, 224],
+                    "train_type": "rgb",
+                    "train_layout": "NCHW",
+                    "runtime_type": "nv12",
+                    "normalization": {
+                        "mean": [123.675, 116.28, 103.53],
+                        "scale": [0.01712475, 0.017507, 0.01742919],
+                        "std": [],
+                    },
+                }
+            ],
+            "calibration": {
+                "algorithm": "default",
+                "sample_limit": sample_limit,
+                "recipe": {
+                    "id": "imagenet-resnet18",
+                    "version": "1",
+                    "resize_short": 256,
+                    "crop_size": [224, 224],
+                    "mean": [0.485, 0.456, 0.406],
+                    "std": [0.229, 0.224, 0.225],
+                },
+            },
+            "compiler": {
+                "compile_mode": compile_mode,
+                "balance_factor": balance_factor,
+                "core_num": resolved_core_num,
+                "optimize_level": optimize_level,
+                "max_l2m_size": resolved_l2m,
+                "max_time_per_fc": 0,
+                "jobs": jobs,
+                "cache_mode": "disable",
+            },
+        }
+        run_id = str(uuid.uuid4())
+        attempt_number = 1
+        attempt_root = f"{run_id}/attempts/{attempt_number}"
+        request = {
+            "contract_version": "1.0",
+            "run_id": run_id,
+            "attempt": attempt_number,
+            "adapter": "openexplorer-3.7.0",
+            "runner_mode": "cpu",
+            "pipeline": ["inspect", "check", "preprocess", "compile", "collect"],
+            "paths": {
+                "model": model_path,
+                "calibration_source": calibration_path,
+                "attempt_root": attempt_root,
+            },
+            "configuration": configuration,
+            "limits": {
+                "timeout_seconds": self._settings.default_timeout_seconds,
+                "max_log_bytes": self._settings.max_log_bytes,
+            },
+        }
+        return self._persist_submission(
+            run_id=run_id,
+            attempt=attempt_number,
+            profile_id=profile.profile_id,
+            profile_sha256=profile_snapshot["sha256"],
+            request=request,
+        )
+
+    def _persist_submission(
+        self,
+        *,
+        run_id: str,
+        attempt: int,
+        profile_id: str,
+        profile_sha256: str,
+        request: dict[str, Any],
+    ) -> RunSubmission:
         validate_payload("request", request)
+        attempt_root = request["paths"]["attempt_root"]
         request_path = self._settings.runs_dir / attempt_root / "request.json"
         _atomic_json(request_path, request)
 
         run = ConversionRun(
             id=run_id,
-            profile_id=profile.profile_id,
-            profile_sha256=profile_snapshot["sha256"],
+            profile_id=profile_id,
+            profile_sha256=profile_sha256,
             status="QUEUED",
             request_snapshot=request,
         )
-        attempt = Attempt(run_id=run_id, number=attempt_number, status="QUEUED")
-        self._repository.create(run=run, attempt=attempt)
-        return RunSubmission(run_id=run_id, attempt=attempt_number, status="QUEUED")
+        attempt_row = Attempt(run_id=run_id, number=attempt, status="QUEUED")
+        self._repository.create(run=run, attempt=attempt_row)
+        return RunSubmission(run_id=run_id, attempt=attempt, status="QUEUED")
 
     def execute(self, run_id: str, attempt: int = 1) -> None:
         container = None
