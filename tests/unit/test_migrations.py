@@ -34,6 +34,12 @@ def test_m2_migration_preserves_existing_m0_runs(tmp_path: Path) -> None:
 
     tables = set(inspect(engine).get_table_names())
     columns = {item["name"] for item in inspect(engine).get_columns("conversion_runs")}
+    model_columns = {
+        item["name"] for item in inspect(engine).get_columns("model_versions")
+    }
+    attempt_columns = {
+        item["name"] for item in inspect(engine).get_columns("run_attempts")
+    }
     with engine.connect() as connection:
         preserved = connection.scalar(
             text(
@@ -51,5 +57,17 @@ def test_m2_migration_preserves_existing_m0_runs(tmp_path: Path) -> None:
         "calibration_versions",
         "calibration_samples",
     }.issubset(tables)
-    assert {"project_id", "model_version_id", "calibration_version_id"}.issubset(columns)
+    assert {
+        "project_id",
+        "model_version_id",
+        "calibration_version_id",
+        "kind",
+        "runner_image_reference",
+        "runner_image_id",
+        "contract_version",
+        "app_version",
+        "generated_yaml",
+    }.issubset(columns)
+    assert {"inspection_run_id", "inspected_at"}.issubset(model_columns)
+    assert {"stage", "cancel_requested_at", "recovered"}.issubset(attempt_columns)
     assert preserved == "SUCCEEDED"

@@ -43,6 +43,7 @@ class Settings:
     runner_pids_limit: int = 512
     stop_timeout_seconds: int = 15
     max_upload_bytes: int = 2 * 1024 * 1024 * 1024
+    min_free_bytes: int = 512 * 1024 * 1024
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost", "[::1]")
 
     @classmethod
@@ -71,6 +72,9 @@ class Settings:
             stop_timeout_seconds=_positive_int("RDKWT_STOP_TIMEOUT_SECONDS", 15),
             max_upload_bytes=_positive_int(
                 "RDKWT_MAX_UPLOAD_BYTES", 2 * 1024 * 1024 * 1024
+            ),
+            min_free_bytes=_positive_int(
+                "RDKWT_MIN_FREE_DISK_BYTES", 512 * 1024 * 1024
             ),
             allowed_hosts=_allowed_hosts(),
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -9,11 +10,19 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import MutableHeaders
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from rdkwt_controller import __version__
 from rdkwt_controller.api import router
-from rdkwt_controller.application import CatalogError, CatalogService, RunService
+from rdkwt_controller.application import (
+    CatalogError,
+    CatalogService,
+    RunOrchestrator,
+    RunService,
+    SystemService,
+)
 from rdkwt_controller.infrastructure.assets import AssetStore
 from rdkwt_controller.infrastructure.db import (
     CatalogRepository,
@@ -35,6 +44,83 @@ class AppServices:
     catalog_service: CatalogService
     docker_gateway: DockerGateway
     run_service: RunService
+    orchestrator: RunOrchestrator
+    system_service: SystemService
+
+
+class LocalSecurityMiddleware:
+    """Pure ASGI middleware so streaming files and SSE are never buffered."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(
+        self, scope: Scope, receive: Receive, send: Send
+    ) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope)
+
+        async def send_with_security(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                if headers.get("X-RDKWT-Sandbox-Report") is not None:
+                    del headers["X-RDKWT-Sandbox-Report"]
+                    headers["Content-Security-Policy"] = (
+                        "sandbox; default-src 'none'; style-src 'unsafe-inline'; "
+                        "img-src data:"
+                    )
+                elif request.url.path not in {"/docs", "/redoc"}:
+                    headers["Content-Security-Policy"] = (
+                        "default-src 'self'; script-src 'self'; style-src 'self'; "
+                        "style-src-attr 'unsafe-inline'; "
+                        "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+                        "base-uri 'none'; frame-ancestors 'none'"
+                    )
+                headers["X-Content-Type-Options"] = "nosniff"
+                headers["Referrer-Policy"] = "no-referrer"
+            await send(message)
+
+        if request.url.path.startswith("/api/") and request.method in {
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+        }:
+            supplied = request.headers.get("x-rdkwt-csrf", "")
+            if not secrets.compare_digest(supplied, request.app.state.csrf_token):
+                response = _problem_response(
+                    "CSRF_TOKEN_INVALID",
+                    "a valid X-RDKWT-CSRF token is required for this local mutation",
+                    403,
+                )
+                await response(scope, receive, send_with_security)
+                return
+            session_key = request.cookies.get("rdkwt_session", "")
+            if not secrets.compare_digest(
+                session_key, request.app.state.session_key
+            ):
+                response = _problem_response(
+                    "SESSION_COOKIE_INVALID",
+                    "a valid SameSite local session cookie is required",
+                    403,
+                )
+                await response(scope, receive, send_with_security)
+                return
+            origin = request.headers.get("origin")
+            if origin is not None and urlsplit(origin).netloc.lower() != request.headers.get(
+                "host", ""
+            ).lower():
+                response = _problem_response(
+                    "ORIGIN_NOT_ALLOWED",
+                    "the request Origin does not match the local application origin",
+                    403,
+                )
+                await response(scope, receive, send_with_security)
+                return
+
+        await self.app(scope, receive, send_with_security)
 
 
 def create_app(
@@ -55,6 +141,7 @@ def create_app(
         asset_store=AssetStore(
             settings.assets_dir, max_upload_bytes=settings.max_upload_bytes
         ),
+        runs_root=settings.runs_dir,
     )
     docker_gateway = (
         DockerGateway.from_env(settings)
@@ -68,11 +155,31 @@ def create_app(
         catalog_repository=catalog_repository,
         docker_gateway=docker_gateway,
     )
+    orchestrator = RunOrchestrator(
+        run_service=run_service,
+        repository=repository,
+        docker_gateway=docker_gateway,
+    )
+    system_service = SystemService(
+        settings=settings,
+        docker_gateway=docker_gateway,
+        repository=repository,
+    )
 
-    app = FastAPI(title="RDK WebToolChain", version=__version__)
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        orchestrator.start()
+        try:
+            yield
+        finally:
+            orchestrator.stop()
+
+    app = FastAPI(title="RDK WebToolChain", version=__version__, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts))
+    app.add_middleware(LocalSecurityMiddleware)
     app.state.settings = settings
     app.state.csrf_token = secrets.token_urlsafe(32)
+    app.state.session_key = secrets.token_urlsafe(32)
     app.state.services = AppServices(
         version=__version__,
         profiles=profiles,
@@ -80,48 +187,14 @@ def create_app(
         catalog_service=catalog_service,
         docker_gateway=docker_gateway,
         run_service=run_service,
+        orchestrator=orchestrator,
+        system_service=system_service,
     )
     app.include_router(router)
 
     @app.exception_handler(CatalogError)
     async def catalog_error(_request: Request, exc: CatalogError) -> JSONResponse:
         return _problem_response(exc.code, str(exc), exc.status_code)
-
-    @app.middleware("http")
-    async def protect_mutations(request: Request, call_next):
-        if request.url.path.startswith("/api/") and request.method in {
-            "POST",
-            "PUT",
-            "PATCH",
-            "DELETE",
-        }:
-            supplied = request.headers.get("x-rdkwt-csrf", "")
-            if not secrets.compare_digest(supplied, request.app.state.csrf_token):
-                return _problem_response(
-                    "CSRF_TOKEN_INVALID",
-                    "a valid X-RDKWT-CSRF token is required for this local mutation",
-                    403,
-                )
-            origin = request.headers.get("origin")
-            if origin is not None and urlsplit(origin).netloc.lower() != request.headers.get(
-                "host", ""
-            ).lower():
-                return _problem_response(
-                    "ORIGIN_NOT_ALLOWED",
-                    "the request Origin does not match the local application origin",
-                    403,
-                )
-        response = await call_next(request)
-        if request.url.path not in {"/docs", "/redoc"}:
-            response.headers["Content-Security-Policy"] = (
-                "default-src 'self'; script-src 'self'; style-src 'self'; "
-                "style-src-attr 'unsafe-inline'; "
-                "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
-                "base-uri 'none'; frame-ancestors 'none'"
-            )
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
-        return response
 
     web_root = Path(__file__).with_name("web")
     app.mount("/static", StaticFiles(directory=web_root), name="static")

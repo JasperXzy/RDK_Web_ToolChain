@@ -157,3 +157,53 @@ def test_runner_writes_failed_result_when_adapter_configuration_is_invalid(
     assert result["status"] == "failed"
     assert result["error"]["code"] == "CONFIG_INVALID"
     assert result["error"]["step"] == "runner"
+
+
+def test_standalone_onnx_inspection_writes_structured_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assets = tmp_path / "assets"
+    runs = tmp_path / "runs"
+    model = assets / "models" / "model.onnx"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"isolated-onnx")
+    runs.mkdir()
+    run_id = str(uuid.uuid4())
+    inspection = {
+        "schema_version": "1",
+        "format": "onnx",
+        "size_bytes": model.stat().st_size,
+        "sha256": "a" * 64,
+        "ir_version": 9,
+        "opsets": [{"domain": "ai.onnx", "version": 13}],
+        "inputs": [
+            {
+                "name": "data",
+                "shape": [1, 3, 224, 224],
+                "dtype": "FLOAT",
+                "dynamic": False,
+            }
+        ],
+        "outputs": [],
+        "operators": {"Conv": 1},
+        "external_data": False,
+        "external_tensor_count": 0,
+        "compatibility_status": "READY",
+        "blockers": [],
+        "warnings": [],
+    }
+    monkeypatch.setattr("rdkwt_runner.main.inspect_onnx", lambda _path: inspection)
+    request = make_request(run_id, "models/model.onnx")
+    request["adapter"] = "onnx-inspection-1.0"
+    request["pipeline"] = ["inspect", "collect"]
+
+    result = execute_request(request, assets, runs)
+    attempt_root = runs / run_id / "attempts" / "1"
+    manifest = json.loads((attempt_root / "artifact-manifest.json").read_text())
+
+    assert result["status"] == "succeeded"
+    assert result["metrics"]["inspect"] == inspection
+    assert manifest["artifacts"][0]["kind"] == "model_inspection"
+    assert json.loads(
+        (attempt_root / "artifacts" / "model-inspection.json").read_text()
+    ) == inspection

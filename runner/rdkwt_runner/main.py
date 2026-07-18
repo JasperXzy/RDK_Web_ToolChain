@@ -15,6 +15,7 @@ from typing import Any
 from . import __version__
 from .adapters import AdapterExecutionError, OpenExplorer370Adapter
 from .filesystem import atomic_write_json, resolve_within, sha256_file
+from .inspection import inspect_onnx
 from .probe import check_toolchain, inspect_asset, toolchain_versions
 
 CONTRACT_VERSION = "1.0"
@@ -92,7 +93,11 @@ def _validate_request(payload: Any) -> dict[str, Any]:
         or payload["attempt"] < 1
     ):
         raise ValueError("attempt must be a positive integer")
-    if payload["adapter"] not in {"contract-probe-1.0", "openexplorer-3.7.0"}:
+    if payload["adapter"] not in {
+        "contract-probe-1.0",
+        "onnx-inspection-1.0",
+        "openexplorer-3.7.0",
+    }:
         raise ValueError(f"unsupported adapter: {payload['adapter']!r}")
     if payload["runner_mode"] != "cpu":
         raise ValueError("the CPU Runner only accepts runner_mode=cpu")
@@ -111,6 +116,11 @@ def _validate_request(payload: Any) -> dict[str, Any]:
         "collect",
     ]:
         raise ValueError("the OpenExplorer 3.7.0 M1 adapter requires the complete ordered pipeline")
+    if payload["adapter"] == "onnx-inspection-1.0" and pipeline != [
+        "inspect",
+        "collect",
+    ]:
+        raise ValueError("the ONNX inspection adapter requires inspect then collect")
     paths = payload["paths"]
     expected_paths = {"model", "calibration_source", "attempt_root"}
     if not isinstance(paths, dict) or set(paths) != expected_paths:
@@ -217,6 +227,20 @@ def execute_request(payload: dict[str, Any], assets_root: Path, runs_root: Path)
                 step: lambda step=step: openexplorer_adapter.run_step(step)
                 for step in openexplorer_adapter.implemented_steps
             }
+        elif request["adapter"] == "onnx-inspection-1.0":
+            inspection_path = attempt_root / "artifacts" / "model-inspection.json"
+
+            def inspect_model() -> dict[str, Any]:
+                try:
+                    details = inspect_onnx(model_path)
+                except ValueError as exc:
+                    raise AdapterExecutionError(
+                        "MODEL_PARSE_FAILED", str(exc), step="inspect"
+                    ) from exc
+                atomic_write_json(inspection_path, details)
+                return details
+
+            operations = {"inspect": inspect_model}
         else:
             operations = {
                 "inspect": lambda: inspect_asset(model_path),
@@ -258,7 +282,23 @@ def execute_request(payload: dict[str, Any], assets_root: Path, runs_root: Path)
             code="COLLECT_STARTED",
             message="collect started",
         )
-        if openexplorer_adapter is None:
+        if request["adapter"] == "onnx-inspection-1.0":
+            artifact_path = attempt_root / "artifacts" / "model-inspection.json"
+            manifest = {
+                "schema_version": "1",
+                "artifacts": [
+                    {
+                        "kind": "model_inspection",
+                        "relative_path": "artifacts/model-inspection.json",
+                        "size_bytes": artifact_path.stat().st_size,
+                        "sha256": sha256_file(artifact_path),
+                        "mime_type": "application/json",
+                        "required": True,
+                    }
+                ],
+            }
+            collect_details = {"artifact_count": 1}
+        elif openexplorer_adapter is None:
             artifact_path = attempt_root / "artifacts" / "probe.json"
             artifact_payload = {
                 "adapter": request["adapter"],

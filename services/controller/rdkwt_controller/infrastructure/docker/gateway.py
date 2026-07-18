@@ -147,6 +147,33 @@ class DockerGateway:
         options = self.container_create_kwargs(run_id=run_id, attempt=attempt, image=image)
         return self._docker().containers.create(**options)
 
+    def create_frozen_attempt(
+        self,
+        *,
+        run_id: str,
+        attempt: int,
+        image_reference: str | None,
+        image_id: str | None,
+    ) -> Container:
+        if image_reference is None or image_id is None:
+            raise ManagedContainerError("run does not contain a frozen Runner image")
+        if not image_id.startswith("sha256:"):
+            raise ManagedContainerError("frozen Runner image ID is not immutable")
+        image_object = self._docker().images.get(image_id)
+        if str(image_object.id) != image_id:
+            raise ManagedContainerError("resolved Runner image does not match the frozen ID")
+        image = ResolvedRunnerImage(
+            logical_id="openexplorer-3.7.0-cpu",
+            configured_reference=image_reference,
+            immutable_id=image_id,
+            repo_digests=tuple(image_object.attrs.get("RepoDigests") or ()),
+        )
+        options = self.container_create_kwargs(run_id=run_id, attempt=attempt, image=image)
+        return self._docker().containers.create(**options)
+
+    def recover_attempt(self, container_id: str, *, run_id: str, attempt: int) -> Container:
+        return self._verified_container(container_id, run_id=run_id, attempt=attempt)
+
     @staticmethod
     def start(container: Container) -> None:
         container.start()
@@ -154,6 +181,18 @@ class DockerGateway:
     @staticmethod
     def logs(container: Container) -> Iterator[bytes]:
         yield from container.logs(stream=True, follow=True, stdout=True, stderr=True)
+
+    @staticmethod
+    def logs_demux(
+        container: Container,
+    ) -> Iterator[tuple[bytes | None, bytes | None]]:
+        yield from container.attach(
+            stream=True,
+            logs=True,
+            stdout=True,
+            stderr=True,
+            demux=True,
+        )
 
     @staticmethod
     def wait(container: Container) -> int:
@@ -173,6 +212,17 @@ class DockerGateway:
             all=True,
             filters={"label": f"{MANAGED_LABEL}=true"},
         )
+
+    @staticmethod
+    def managed_identity(container: Container) -> tuple[str, int] | None:
+        container.reload()
+        labels = container.attrs.get("Config", {}).get("Labels", {}) or {}
+        if labels.get(MANAGED_LABEL) != "true":
+            return None
+        try:
+            return str(uuid.UUID(labels[RUN_ID_LABEL])), int(labels[ATTEMPT_LABEL])
+        except (KeyError, TypeError, ValueError):
+            return None
 
     def _verified_container(self, container_id: str, *, run_id: str, attempt: int) -> Container:
         container = self._docker().containers.get(container_id)

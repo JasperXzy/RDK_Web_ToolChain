@@ -80,3 +80,9 @@ POST   /api/v1/calibration-versions/{version_id}/finalize
 - ResNet18 S100/S600 Golden 使用与 Catalog 相同的内容寻址 `.onnx` 路径。
 - 本地临时实例已通过无头 Chrome 以 1440×1000 视口检查；HTML、CSS、JS 与所有初始化
   API 均返回成功。
+
+## 后续决策
+
+[ADR-014](./ADR-014-m2-orchestration-and-web-product.md) 已完成本 ADR 所列的独立模型检查、
+声明式图片预处理预览、SSE、取消、重试、重启恢复、产物导出和终态项目级联删除。直接
+NPY/ZIP 校准导入仍保留为后续范围。

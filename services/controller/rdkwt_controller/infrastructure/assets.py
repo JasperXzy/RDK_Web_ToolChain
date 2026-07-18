@@ -281,6 +281,17 @@ class AssetStore:
             raise AssetStoreError("BLOB_PATH_INVALID", "stored blob is not a regular file")
         return resolved
 
+    def resolve_verified_blob(
+        self, blob_key: str, *, sha256: str, size_bytes: int
+    ) -> Path:
+        path = self.resolve_blob(blob_key)
+        if path.stat().st_size != size_bytes or _sha256_file(path) != sha256:
+            raise AssetStoreError(
+                "BLOB_INTEGRITY_FAILED",
+                "stored content no longer matches its catalog metadata",
+            )
+        return path
+
     def delete_unreferenced(self, *, blob_keys: list[str], version_ids: list[str]) -> None:
         for blob_key in blob_keys:
             try:

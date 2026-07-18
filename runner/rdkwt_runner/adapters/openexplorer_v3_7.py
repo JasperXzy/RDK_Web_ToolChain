@@ -10,13 +10,13 @@ import signal
 import subprocess
 import sys
 import time
-from collections import Counter
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from ..filesystem import atomic_write_json, atomic_write_text, sha256_file
+from ..inspection import inspect_onnx
 
 ADAPTER_ID = "openexplorer-3.7.0"
 OUTPUT_PREFIX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -24,6 +24,8 @@ SUPPORTED_IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png"}
 SUPPORTED_CALIBRATION_ALGORITHMS = {"default", "mix", "kl", "max"}
 SUPPORTED_COMPILE_MODES = {"latency", "bandwidth", "balance"}
 SUPPORTED_OPTIMIZE_LEVELS = {"O0", "O1", "O2"}
+SUPPORTED_TRAIN_TYPES = {"rgb", "bgr", "gray"}
+SUPPORTED_RUNTIME_TYPES = {"nv12", "rgb", "bgr", "yuv444", "gray", "featuremap"}
 
 
 class AdapterExecutionError(RuntimeError):
@@ -191,19 +193,43 @@ def validate_configuration(configuration: Any) -> dict[str, Any]:
         or any(isinstance(item, bool) or not isinstance(item, int) or item < 1 for item in shape)
     ):
         raise ValueError("inputs[0].target_shape must contain four positive integers")
-    if shape[0] != 1 or shape[1] != 3:
-        raise ValueError("the M1 ImageNet recipe requires target shape [1, 3, H, W]")
-    if input_config["train_type"] != "rgb" or input_config["train_layout"] != "NCHW":
-        raise ValueError("the M1 ImageNet recipe requires rgb/NCHW training input")
-    if input_config["runtime_type"] not in {"nv12", "featuremap"}:
-        raise ValueError("runtime_type must be nv12 or featuremap")
-    if input_config["runtime_type"] == "nv12" and (shape[2] % 2 or shape[3] % 2):
+    layout = input_config["train_layout"]
+    if layout not in {"NCHW", "NHWC"}:
+        raise ValueError("train_layout must be NCHW or NHWC")
+    train_type = input_config["train_type"]
+    if train_type not in SUPPORTED_TRAIN_TYPES:
+        raise ValueError("train_type must be rgb, bgr, or gray")
+    if input_config["runtime_type"] not in SUPPORTED_RUNTIME_TYPES:
+        raise ValueError("unsupported runtime_type")
+    batch = shape[0]
+    channels = shape[1] if layout == "NCHW" else shape[3]
+    height = shape[2] if layout == "NCHW" else shape[1]
+    width = shape[3] if layout == "NCHW" else shape[2]
+    expected_channels = 1 if train_type == "gray" else 3
+    if batch != 1 or channels != expected_channels:
+        raise ValueError(
+            f"{train_type}/{layout} requires batch 1 and {expected_channels} channels"
+        )
+    if input_config["runtime_type"] == "nv12" and (height % 2 or width % 2):
         raise ValueError("NV12 target height and width must be even")
     normalization = _expect_object(input_config["normalization"], "inputs[0].normalization")
     _expect_exact_fields(normalization, {"mean", "scale", "std"}, "inputs[0].normalization")
-    _numeric_list(normalization["mean"], "normalization.mean", allowed_lengths={0, 1, 3})
-    _numeric_list(normalization["scale"], "normalization.scale", allowed_lengths={0, 1, 3})
-    _numeric_list(normalization["std"], "normalization.std", allowed_lengths={0, 1, 3})
+    allowed_normalization_lengths = {0, 1, channels}
+    _numeric_list(
+        normalization["mean"],
+        "normalization.mean",
+        allowed_lengths=allowed_normalization_lengths,
+    )
+    _numeric_list(
+        normalization["scale"],
+        "normalization.scale",
+        allowed_lengths=allowed_normalization_lengths,
+    )
+    _numeric_list(
+        normalization["std"],
+        "normalization.std",
+        allowed_lengths=allowed_normalization_lengths,
+    )
 
     calibration = _expect_object(config["calibration"], "calibration")
     _expect_exact_fields(calibration, {"algorithm", "sample_limit", "recipe"}, "calibration")
@@ -221,7 +247,9 @@ def validate_configuration(configuration: Any) -> dict[str, Any]:
         {"id", "version", "resize_short", "crop_size", "mean", "std"},
         "calibration.recipe",
     )
-    if recipe["id"] != "imagenet-resnet18" or recipe["version"] != "1":
+    if recipe["id"] not in {"imagenet-resnet18", "image-center-crop"} or recipe[
+        "version"
+    ] != "1":
         raise ValueError("unsupported calibration recipe")
     if (
         isinstance(recipe["resize_short"], bool)
@@ -229,10 +257,14 @@ def validate_configuration(configuration: Any) -> dict[str, Any]:
         or recipe["resize_short"] < 1
     ):
         raise ValueError("calibration.recipe.resize_short must be positive")
-    if recipe["crop_size"] != [shape[2], shape[3]]:
+    if recipe["crop_size"] != [height, width]:
         raise ValueError("calibration crop_size must match the target input height and width")
-    _numeric_list(recipe["mean"], "calibration.recipe.mean", allowed_lengths={3})
-    std = _numeric_list(recipe["std"], "calibration.recipe.std", allowed_lengths={3})
+    _numeric_list(
+        recipe["mean"], "calibration.recipe.mean", allowed_lengths={channels}
+    )
+    std = _numeric_list(
+        recipe["std"], "calibration.recipe.std", allowed_lengths={channels}
+    )
     if any(item == 0 for item in std):
         raise ValueError("calibration.recipe.std cannot contain zero")
 
@@ -356,6 +388,46 @@ def parse_static_metrics(payload: Any) -> dict[str, Any]:
     }
 
 
+def parse_quantized_cosines(log_text: str) -> dict[str, Any]:
+    section: str | None = None
+    nodes: list[dict[str, Any]] = []
+    outputs: list[dict[str, Any]] = []
+    for raw_line in log_text.splitlines():
+        if "NodeType" in raw_line and "Quantized Cosine" in raw_line:
+            section = "nodes"
+            continue
+        if "TensorName" in raw_line and "Quantized Cosine" in raw_line:
+            section = "outputs"
+            continue
+        if section is None or "|" not in raw_line:
+            continue
+        fields = [item.strip() for item in raw_line.strip().strip("|").split("|")]
+        try:
+            if section == "nodes" and len(fields) == 7:
+                cosine = float(fields[5])
+                nodes.append(
+                    {
+                        "name": fields[0],
+                        "type": fields[1],
+                        "device": fields[2],
+                        "quantized_cosine": cosine,
+                    }
+                )
+            elif section == "outputs" and len(fields) == 3:
+                outputs.append(
+                    {"name": fields[0], "quantized_cosine": float(fields[2])}
+                )
+        except ValueError:
+            continue
+    minimum_node = min(nodes, key=lambda item: item["quantized_cosine"]) if nodes else None
+    return {
+        "output_cosines": outputs,
+        "minimum_node": minimum_node,
+        "node_count": len(nodes),
+        "reference_only": True,
+    }
+
+
 class OpenExplorer370Adapter:
     implemented_steps = frozenset({"inspect", "check", "preprocess", "compile"})
 
@@ -386,6 +458,7 @@ class OpenExplorer370Adapter:
         self.generated_config = attempt_root / "generated.yaml"
         self.inspection_path = self.work_root / "model-inspection.json"
         self.calibration_manifest_path = self.work_root / "calibration-manifest.json"
+        self.calibration_preview_path = self.work_root / "calibration-preview.png"
         self.is_cancel_requested = is_cancel_requested
         self.max_log_bytes = int(request["limits"]["max_log_bytes"])
         self.timeout_seconds = int(request["limits"]["timeout_seconds"])
@@ -407,68 +480,21 @@ class OpenExplorer370Adapter:
 
     def inspect(self) -> dict[str, Any]:
         try:
-            import onnx
-            from onnx.external_data_helper import uses_external_data
-
-            model = onnx.load(str(self.model_path), load_external_data=False)
-        except Exception as exc:
+            details = inspect_onnx(self.model_path)
+        except ValueError as exc:
             raise AdapterExecutionError(
-                "MODEL_PARSE_FAILED", f"failed to parse ONNX model: {exc}", step="inspect"
+                "MODEL_PARSE_FAILED", str(exc), step="inspect"
             ) from exc
-        external_tensors = [
-            item.name for item in model.graph.initializer if uses_external_data(item)
-        ]
-        if external_tensors:
-            raise AdapterExecutionError(
-                "MODEL_EXTERNAL_DATA_UNSUPPORTED",
-                "ONNX external data is not supported in M1",
-                step="inspect",
-                details={"tensor_count": len(external_tensors)},
-            )
-        try:
-            onnx.checker.check_model(model)
-        except Exception as exc:
-            raise AdapterExecutionError(
-                "MODEL_PARSE_FAILED", f"ONNX checker rejected the model: {exc}", step="inspect"
-            ) from exc
-
-        initializer_names = {item.name for item in model.graph.initializer}
-
-        def tensor_info(value_info: Any) -> dict[str, Any]:
-            tensor_type = value_info.type.tensor_type
-            dimensions: list[int | str | None] = []
-            for dimension in tensor_type.shape.dim:
-                if dimension.HasField("dim_value") and dimension.dim_value > 0:
-                    dimensions.append(int(dimension.dim_value))
-                elif dimension.HasField("dim_param") and dimension.dim_param:
-                    dimensions.append(str(dimension.dim_param))
-                else:
-                    dimensions.append(None)
-            return {
-                "name": value_info.name,
-                "shape": dimensions,
-                "dtype": onnx.TensorProto.DataType.Name(tensor_type.elem_type),
-            }
-
-        details = {
-            "format": "onnx",
-            "size_bytes": self.model_path.stat().st_size,
-            "sha256": sha256_file(self.model_path),
-            "ir_version": int(model.ir_version),
-            "opsets": [
-                {"domain": item.domain or "ai.onnx", "version": int(item.version)}
-                for item in model.opset_import
-            ],
-            "inputs": [
-                tensor_info(item)
-                for item in model.graph.input
-                if item.name not in initializer_names
-            ],
-            "outputs": [tensor_info(item) for item in model.graph.output],
-            "operators": dict(sorted(Counter(node.op_type for node in model.graph.node).items())),
-            "external_data": False,
-        }
         atomic_write_json(self.inspection_path, details)
+        blockers = details["blockers"]
+        if blockers:
+            blocker = blockers[0]
+            raise AdapterExecutionError(
+                str(blocker["code"]),
+                str(blocker["message"]),
+                step="inspect",
+                details={"blockers": blockers},
+            )
         return details
 
     def check(self) -> dict[str, Any]:
@@ -525,9 +551,16 @@ class OpenExplorer370Adapter:
             )
 
         recipe = self.configuration["calibration"]["recipe"]
+        input_config = self.configuration["inputs"][0]
         crop_height, crop_width = recipe["crop_size"]
-        mean = np.asarray(recipe["mean"], dtype=np.float32).reshape(3, 1, 1)
-        std = np.asarray(recipe["std"], dtype=np.float32).reshape(3, 1, 1)
+        channels = 1 if input_config["train_type"] == "gray" else 3
+        stat_shape = (
+            (channels, 1, 1)
+            if input_config["train_layout"] == "NCHW"
+            else (1, 1, channels)
+        )
+        mean = np.asarray(recipe["mean"], dtype=np.float32).reshape(stat_shape)
+        std = np.asarray(recipe["std"], dtype=np.float32).reshape(stat_shape)
         self.calibration_root.mkdir(parents=True, exist_ok=True)
         samples = []
         for index, source in enumerate(selected):
@@ -535,7 +568,9 @@ class OpenExplorer370Adapter:
                 raise InterruptedError("runner cancellation requested")
             try:
                 with Image.open(source) as opened:
-                    image = opened.convert("RGB")
+                    image = opened.convert(
+                        "L" if input_config["train_type"] == "gray" else "RGB"
+                    )
                     width, height = image.size
                     short = int(recipe["resize_short"])
                     if width <= height:
@@ -548,7 +583,15 @@ class OpenExplorer370Adapter:
                     if left < 0 or top < 0:
                         raise ValueError("resized image is smaller than the configured crop")
                     image = image.crop((left, top, left + crop_width, top + crop_height))
-                    array = np.asarray(image, dtype=np.float32).transpose(2, 0, 1)
+                    if index == 0:
+                        image.save(self.calibration_preview_path, format="PNG")
+                    array = np.asarray(image, dtype=np.float32)
+                    if array.ndim == 2:
+                        array = array[:, :, None]
+                    if input_config["train_type"] == "bgr":
+                        array = array[:, :, ::-1]
+                    if input_config["train_layout"] == "NCHW":
+                        array = array.transpose(2, 0, 1)
                     array = (array / np.float32(255.0) - mean) / std
             except Exception as exc:
                 raise AdapterExecutionError(
@@ -558,7 +601,9 @@ class OpenExplorer370Adapter:
                     details={"sample": source.name},
                 ) from exc
             source_digest = sha256_file(source)
-            output = self.calibration_root / f"{index:04d}_{source_digest[:12]}.bgr.npy"
+            output = self.calibration_root / (
+                f"{index:04d}_{source_digest[:12]}.{input_config['train_type']}.npy"
+            )
             np.save(output, array.astype(np.float32, copy=False), allow_pickle=False)
             samples.append(
                 {
@@ -569,6 +614,9 @@ class OpenExplorer370Adapter:
                     "output_sha256": sha256_file(output),
                     "shape": list(array.shape),
                     "dtype": "float32",
+                    "minimum": float(array.min()),
+                    "maximum": float(array.max()),
+                    "mean": float(array.mean()),
                 }
             )
 
@@ -601,6 +649,13 @@ class OpenExplorer370Adapter:
             "sample_count": len(samples),
             "calibration_dir": self.calibration_root.relative_to(self.attempt_root).as_posix(),
             "configuration": self.generated_config.relative_to(self.attempt_root).as_posix(),
+            "preview": self.calibration_preview_path.relative_to(
+                self.attempt_root
+            ).as_posix(),
+            "first_sample_statistics": {
+                key: samples[0][key]
+                for key in ("shape", "dtype", "minimum", "maximum", "mean")
+            },
         }
 
     def compile(self) -> dict[str, Any]:
@@ -623,6 +678,11 @@ class OpenExplorer370Adapter:
                 step="compile",
             )
         metrics = self._parse_static_metrics()
+        quantization = parse_quantized_cosines(
+            (self.logs_root / "compile.log").read_text(
+                encoding="utf-8", errors="replace"
+            )
+        )
         profile = self.configuration["target_profile"]["profile"]
         compiler = self.configuration["compiler"]
         if metrics.get("march") not in {None, profile["march"]}:
@@ -644,6 +704,7 @@ class OpenExplorer370Adapter:
             "hbm_size_bytes": hbm.stat().st_size,
             "hbm_sha256": sha256_file(hbm),
             "static_performance": metrics,
+            "quantization": quantization,
         }
 
     def collect(self, *, require_hbm: bool) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -670,6 +731,13 @@ class OpenExplorer370Adapter:
                 "application/json",
                 False,
                 "calibration-manifest.json",
+            ),
+            (
+                "calibration_preview",
+                self.calibration_preview_path,
+                "image/png",
+                False,
+                "calibration-preview.png",
             ),
             ("tool_log", self.logs_root / "check.log", "text/plain", False, None),
             ("tool_log", self.logs_root / "compile.log", "text/plain", False, None),
@@ -716,8 +784,55 @@ class OpenExplorer370Adapter:
                 f"{self.output_prefix}.html",
             ),
         ]
+        candidates.extend(
+            [
+                (kind, self.output_root / filename, mime_type, False, filename)
+                for kind, filename, mime_type in (
+                    (
+                        "original_onnx",
+                        f"{self.output_prefix}_original_float_model.onnx",
+                        "application/onnx",
+                    ),
+                    (
+                        "optimized_onnx",
+                        f"{self.output_prefix}_optimized_float_model.onnx",
+                        "application/onnx",
+                    ),
+                    (
+                        "calibrated_onnx",
+                        f"{self.output_prefix}_calibrated_model.onnx",
+                        "application/onnx",
+                    ),
+                    (
+                        "ptq_onnx",
+                        f"{self.output_prefix}_ptq_model.onnx",
+                        "application/onnx",
+                    ),
+                    (
+                        "quantized_bc",
+                        f"{self.output_prefix}_quantized_model.bc",
+                        "application/octet-stream",
+                    ),
+                    (
+                        "quantized_removed_bc",
+                        f"{self.output_prefix}_quantized_removed_model.bc",
+                        "application/octet-stream",
+                    ),
+                    (
+                        "node_info",
+                        f"{self.output_prefix}_node_info.csv",
+                        "text/csv",
+                    ),
+                    ("tool_log", "hb_compile.log", "text/plain"),
+                )
+            ]
+        )
+        seen_sources: set[Path] = set()
         artifacts: list[dict[str, Any]] = []
         for kind, source, mime_type, required, destination_name in candidates:
+            if source in seen_sources:
+                continue
+            seen_sources.add(source)
             if not source.exists():
                 if required:
                     raise AdapterExecutionError(
@@ -784,7 +899,7 @@ class OpenExplorer370Adapter:
                 command,
                 cwd=cwd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 start_new_session=True,
             )
         except OSError as exc:
@@ -796,8 +911,10 @@ class OpenExplorer370Adapter:
                 details={"executable": command[0]},
             ) from exc
         assert process.stdout is not None
+        assert process.stderr is not None
         selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ)
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
         written = 0
         truncated = False
         try:
@@ -822,8 +939,13 @@ class OpenExplorer370Adapter:
                         accepted = chunk[:remaining]
                         if accepted:
                             log.write(accepted)
-                            sys.stdout.buffer.write(accepted)
-                            sys.stdout.buffer.flush()
+                            output = (
+                                sys.stdout.buffer
+                                if key.data == "stdout"
+                                else sys.stderr.buffer
+                            )
+                            output.write(accepted)
+                            output.flush()
                             written += len(accepted)
                         if len(accepted) < len(chunk):
                             truncated = True

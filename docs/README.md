@@ -9,6 +9,7 @@
 - [ADR-011](./adr/ADR-011-runner-runtime-boundary.md)：记录 M0 Runner 运行时、Named Volume 与受限容器 Spike 结论。
 - [ADR-012](./adr/ADR-012-openexplorer-3.7-m1-baseline.md)：记录 M1 ResNet18 S100/S600 真实校准编译基线与 Adapter 决策。
 - [ADR-013](./adr/ADR-013-m2-project-asset-catalog.md)：记录 M2 项目/资产目录、内容寻址存储、校准版本和本地 Web 安全边界。
+- [ADR-014](./adr/ADR-014-m2-orchestration-and-web-product.md)：记录 M2 独立模型检查、持久队列、SSE、取消/恢复、结果导出和六步 Web 闭环。
 
 ## 已确认的核心决策
 

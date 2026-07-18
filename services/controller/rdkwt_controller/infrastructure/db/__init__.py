@@ -1,4 +1,4 @@
-from .catalog_repository import CatalogRepository, ConversionInputs
+from .catalog_repository import CatalogRepository, ConversionInputs, ModelInspectionInput
 from .models import (
     Asset,
     Attempt,
@@ -11,7 +11,7 @@ from .models import (
     ModelVersion,
     Project,
 )
-from .repository import RunRepository
+from .repository import ExecutionRecord, RunRepository
 from .session import create_database, create_session_factory, migrate_database
 
 __all__ = [
@@ -24,7 +24,9 @@ __all__ = [
     "CatalogRepository",
     "ConversionInputs",
     "ConversionRun",
+    "ExecutionRecord",
     "Model",
+    "ModelInspectionInput",
     "ModelVersion",
     "Project",
     "RunRepository",

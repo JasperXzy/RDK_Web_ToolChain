@@ -31,11 +31,14 @@ def _container_http_json(
     script = (
         "import base64,json,urllib.request;"
         f"data=base64.b64decode('{encoded_payload}') if '{encoded_payload}' else None;"
-        f"csrf=json.loads(urllib.request.urlopen('http://127.0.0.1:8080/api/v1/session').read())"
-        f"['csrf_token'] if '{method}' != 'GET' else '';"
+        f"session=urllib.request.urlopen('http://127.0.0.1:8080/api/v1/session') "
+        f"if '{method}' != 'GET' else None;"
+        "csrf=json.loads(session.read())['csrf_token'] if session else '';"
+        "cookie=session.headers.get('Set-Cookie').split(';',1)[0] if session else '';"
         f"request=urllib.request.Request('http://127.0.0.1:8080{path}',data=data,method='{method}');"
         "request.add_header('Content-Type','application/json');"
         "request.add_header('X-RDKWT-CSRF',csrf) if csrf else None;"
+        "request.add_header('Cookie',cookie) if cookie else None;"
         "print(urllib.request.urlopen(request,timeout=10).read().decode())"
     )
     exit_code, output = container.exec_run(["python", "-c", script])
@@ -153,7 +156,9 @@ def test_controller_creates_collects_and_cleans_restricted_runner() -> None:
             time.sleep(0.25)
 
         assert result is not None
-        assert result["status"] == "SUCCEEDED"  # type: ignore[index]
+        assert result["status"] == "SUCCEEDED", json.dumps(  # type: ignore[index]
+            result, indent=2, ensure_ascii=False
+        )
         assert result["attempts"][0]["exit_code"] == 0  # type: ignore[index]
         leftovers = client.containers.list(
             all=True,

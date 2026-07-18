@@ -14,9 +14,14 @@
       <span class="brand-mark" aria-hidden="true">R</span>
       <span><strong>RDK</strong><small>WebToolChain</small></span>
     </a>
+    <nav class="topnav" aria-label="主导航">
+      <button class="topnav-item active" data-view="workspace" type="button">工作台</button>
+      <button class="topnav-item" data-view="runs" type="button">任务</button>
+    </nav>
     <div class="topbar-actions">
-      <span id="system-status" class="status-pill neutral"><span></span>正在检查环境</span>
-      <a class="quiet-link" href="/docs">API 文档 ↗</a>
+      <button id="system-status" class="status-pill neutral status-button" type="button"><span></span>正在检查环境</button>
+      <span id="queue-status" class="queue-status">队列 0</span>
+      <a class="quiet-link" href="/docs">API ↗</a>
     </div>
   </header>
 
@@ -24,7 +29,7 @@
     <aside class="sidebar">
       <div class="sidebar-heading">
         <div><span class="eyebrow">Workspace</span><h2>项目</h2></div>
-        <button id="toggle-create-project" class="icon-button" type="button" title="新建项目">＋</button>
+        <button id="toggle-create-project" class="icon-button" type="button" title="新建项目" aria-label="新建项目">＋</button>
       </div>
       <form id="create-project-form" class="compact-form hidden">
         <label>项目名称<input id="project-name" maxlength="200" required placeholder="例如：ResNet18 基线"></label>
@@ -33,82 +38,145 @@
       </form>
       <nav id="project-list" class="project-list" aria-label="项目列表"></nav>
       <div id="project-empty" class="sidebar-empty">还没有项目。创建一个项目开始管理模型和校准数据。</div>
+      <div class="sidebar-foot">
+        <span>LOCAL ONLY</span>
+        <small>转换容器默认断网运行</small>
+      </div>
     </aside>
 
     <main class="workspace">
-      <section id="welcome" class="welcome-panel">
-        <div class="welcome-copy">
-          <span class="eyebrow accent">M2 · P0 Web 产品</span>
-          <h1><span>把模型转换变成一条</span><span>可追溯的本地工作流。</span></h1>
-          <p>创建项目，上传 ONNX 与真实校准图片。系统会对内容计算 SHA-256、复用重复存储，并只把受控资源 ID 交给转换任务。</p>
-          <button id="welcome-create" class="button primary" type="button">创建第一个项目</button>
-        </div>
-        <div class="flow-card" aria-label="工作流概览">
-          <div class="flow-step active"><b>01</b><span>项目与资产<small>上传、哈希、版本</small></span></div>
-          <div class="flow-line"></div>
-          <div class="flow-step"><b>02</b><span>平台配置<small>S100 / S600</small></span></div>
-          <div class="flow-line"></div>
-          <div class="flow-step"><b>03</b><span>隔离转换<small>日志、产物、指标</small></span></div>
-        </div>
+      <section id="workspace-view">
+        <section id="welcome" class="welcome-panel">
+          <div class="welcome-copy">
+            <span class="eyebrow accent">M2 · P0 WEB PRODUCT</span>
+            <h1><span>模型转换，</span><span>从黑盒变成工作流。</span></h1>
+            <p>导入 ONNX，冻结校准数据和平台配置，在隔离 Runner 中完成 S100 / S600 转换。每次执行都有独立日志、结果与可复现导出包。</p>
+            <div class="hero-actions"><button id="welcome-create" class="button primary" type="button">创建第一个项目</button><button id="welcome-preflight" class="button ghost" type="button">查看环境预检</button></div>
+          </div>
+          <div class="readiness-card">
+            <div class="readiness-head"><span class="eyebrow">Readiness</span><strong id="readiness-score">检查中</strong></div>
+            <div id="readiness-checks" class="readiness-checks"></div>
+            <div class="readiness-foot"><span>Docker / Runner / Storage</span><small>数据不离开本机</small></div>
+          </div>
+        </section>
+
+        <section id="project-workspace" class="hidden">
+          <div class="project-header">
+            <div class="project-title"><span class="eyebrow">Current project</span><h1 id="current-project-name"></h1><p id="current-project-description"></p><button id="delete-project" class="danger-link" type="button">删除项目</button></div>
+            <div class="project-actions"><button id="refresh-project" class="button ghost" type="button">刷新</button><button id="open-wizard" class="button primary" type="button">新建转换</button></div>
+          </div>
+
+          <div class="project-metrics">
+            <div><span>模型版本</span><strong id="metric-models">0</strong><small id="metric-model-ready">0 可转换</small></div>
+            <div><span>校准集</span><strong id="metric-calibrations">0</strong><small id="metric-calibration-ready">0 已冻结</small></div>
+            <div><span>任务</span><strong id="metric-runs">0</strong><small id="metric-run-success">0 成功</small></div>
+            <div><span>磁盘占用</span><strong id="metric-storage">0 B</strong><small>资产与任务产物</small></div>
+          </div>
+
+          <div class="section-grid">
+            <section class="panel asset-panel">
+              <div class="panel-heading"><div><span class="step-label">01 · MODEL</span><h2>ONNX 模型</h2></div><span class="hint">最大 <span id="upload-limit">—</span></span></div>
+              <form id="model-upload-form" class="upload-form">
+                <label class="drop-zone" for="model-file"><span class="upload-icon">↑</span><strong>选择 ONNX 文件</strong><small id="model-file-label">上传后由隔离 Runner 解析结构和兼容性</small><input id="model-file" type="file" accept=".onnx" required></label>
+                <div class="field-row"><label>模型名称<input id="model-name" maxlength="200" placeholder="默认使用文件名"></label><button class="button secondary" type="submit">上传模型</button></div>
+                <div class="progress hidden" id="model-progress"><span></span></div>
+              </form>
+              <div id="model-list" class="asset-list"></div>
+            </section>
+
+            <section class="panel asset-panel">
+              <div class="panel-heading"><div><span class="step-label">02 · CALIBRATION</span><h2>图片校准集</h2></div><span class="hint">20–100 张</span></div>
+              <form id="calibration-create-form" class="inline-create">
+                <input id="calibration-name" maxlength="200" required placeholder="校准集名称">
+                <button class="button secondary" type="submit">新建草稿</button>
+              </form>
+              <label>当前版本<select id="calibration-version-select"><option value="">先创建校准集</option></select></label>
+              <form id="sample-upload-form" class="upload-form compact">
+                <label class="drop-zone small" for="sample-files"><span class="upload-icon">＋</span><strong>选择 JPEG / PNG / BMP</strong><small id="sample-file-label">可一次选择多张，按选择顺序登记</small><input id="sample-files" type="file" accept=".jpg,.jpeg,.png,.bmp" multiple required></label>
+                <div class="progress hidden" id="sample-progress"><span></span></div>
+                <div class="split-actions"><button class="button secondary" type="submit">上传样本</button><button id="finalize-calibration" class="button ghost" type="button">定稿并冻结</button></div>
+              </form>
+              <div id="calibration-list" class="asset-list"></div>
+            </section>
+          </div>
+
+          <section class="panel activity-panel">
+            <div class="panel-heading"><div><span class="step-label">ACTIVITY</span><h2>项目任务</h2></div><button id="refresh-runs" class="button ghost small" type="button">刷新</button></div>
+            <div id="project-run-list" class="run-list"><div class="empty-state">暂无任务</div></div>
+          </section>
+        </section>
       </section>
 
-      <section id="project-workspace" class="hidden">
-        <div class="project-header">
-          <div><span class="eyebrow">Current project</span><h1 id="current-project-name"></h1><p id="current-project-description"></p><button id="delete-project" class="danger-link" type="button">删除项目</button></div>
-          <div class="project-metrics">
-            <div><strong id="metric-models">0</strong><span>模型</span></div>
-            <div><strong id="metric-calibrations">0</strong><span>校准集</span></div>
-            <div><strong id="metric-storage">0 B</strong><span>资产占用</span></div>
-          </div>
+      <section id="runs-view" class="hidden">
+        <div class="page-heading"><div><span class="eyebrow">Execution history</span><h1>任务与队列</h1><p>排队、转换、模型检查和所有历史 Attempt 都保存在本机。</p></div><button id="refresh-all-runs" class="button ghost" type="button">刷新</button></div>
+        <div class="run-summary-grid">
+          <div><span>排队</span><strong id="runs-queued">0</strong></div><div><span>执行中</span><strong id="runs-active">0</strong></div><div><span>成功</span><strong id="runs-succeeded">0</strong></div><div><span>需处理</span><strong id="runs-attention">0</strong></div>
         </div>
-
-        <div class="section-grid">
-          <section class="panel">
-            <div class="panel-heading"><div><span class="step-label">01 · MODEL</span><h2>ONNX 模型</h2></div><span class="hint">最大 <span id="upload-limit">—</span></span></div>
-            <form id="model-upload-form" class="upload-form">
-              <label class="drop-zone" for="model-file"><span class="upload-icon">↑</span><strong>选择 ONNX 文件</strong><small id="model-file-label">文件保留原名用于展示，内部使用内容哈希</small><input id="model-file" type="file" accept=".onnx" required></label>
-              <label>模型名称<input id="model-name" maxlength="200" placeholder="默认使用文件名"></label>
-              <div class="progress hidden" id="model-progress"><span></span></div>
-              <button class="button primary" type="submit">上传并登记模型</button>
-            </form>
-            <div id="model-list" class="asset-list"></div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-heading"><div><span class="step-label">02 · CALIBRATION</span><h2>图片校准集</h2></div><span class="hint">推荐 20–100 张</span></div>
-            <form id="calibration-create-form" class="inline-create">
-              <input id="calibration-name" maxlength="200" required placeholder="校准集名称">
-              <button class="button secondary" type="submit">新建草稿</button>
-            </form>
-            <label>校准版本<select id="calibration-version-select"><option value="">先创建校准集</option></select></label>
-            <form id="sample-upload-form" class="upload-form compact">
-              <label class="drop-zone small" for="sample-files"><span class="upload-icon">＋</span><strong>选择 JPEG / PNG / BMP</strong><small id="sample-file-label">可一次选择多张，按选择顺序登记</small><input id="sample-files" type="file" accept=".jpg,.jpeg,.png,.bmp" multiple required></label>
-              <div class="progress hidden" id="sample-progress"><span></span></div>
-              <div class="split-actions"><button class="button secondary" type="submit">上传样本</button><button id="finalize-calibration" class="button ghost" type="button">定稿版本</button></div>
-            </form>
-            <div id="calibration-list" class="asset-list"></div>
-          </section>
-        </div>
-
-        <section class="panel conversion-panel">
-          <div class="panel-heading"><div><span class="step-label">03 · CONVERT</span><h2>创建转换任务</h2></div><span class="status-pill neutral">OpenExplorer 3.7.0</span></div>
-          <form id="conversion-form" class="conversion-form">
-            <label>模型版本<select id="conversion-model" required><option value="">选择模型</option></select></label>
-            <label>校准版本<select id="conversion-calibration" required><option value="">选择已定稿版本</option></select></label>
-            <label>目标平台<select id="conversion-profile" required></select></label>
-            <label>输出前缀<input id="output-prefix" value="resnet18_224x224_nv12" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" required></label>
-            <button class="button primary" type="submit">提交隔离转换</button>
-          </form>
-          <p class="form-note">S100 自动锁定单核与 L2M=0；S600 默认双核并自动分配 L2M。任务提交后配置和资源版本不可变。</p>
-        </section>
-
-        <section class="panel runs-panel">
-          <div class="panel-heading"><div><span class="step-label">ACTIVITY</span><h2>最近任务</h2></div><button id="refresh-runs" class="button ghost small" type="button">刷新</button></div>
-          <div id="run-list" class="run-list"><div class="empty-state">暂无转换任务</div></div>
-        </section>
+        <section class="panel"><div class="filter-bar"><label>状态<select id="run-filter"><option value="all">全部状态</option><option value="active">执行中</option><option value="SUCCEEDED">成功</option><option value="FAILED">失败</option><option value="CANCELLED">已取消</option><option value="INTERRUPTED">已中断</option></select></label><label>搜索<input id="run-search" type="search" placeholder="Run ID / 平台 / 项目"></label></div><div id="all-run-list" class="run-list detailed"></div></section>
       </section>
     </main>
   </div>
+
+  <dialog id="wizard-dialog" class="sheet-dialog wizard-dialog">
+    <div class="dialog-shell">
+      <header class="dialog-header"><div><span class="eyebrow">New conversion</span><h2>六步转换向导</h2><p id="wizard-draft-status">草稿自动保存在当前浏览器</p></div><button class="close-button" data-close="wizard-dialog" type="button" aria-label="关闭">×</button></header>
+      <ol id="wizard-steps" class="wizard-steps">
+        <li class="active" data-step="1"><b>1</b><span>模型</span></li><li data-step="2"><b>2</b><span>目标平台</span></li><li data-step="3"><b>3</b><span>输入配置</span></li><li data-step="4"><b>4</b><span>校准与预处理</span></li><li data-step="5"><b>5</b><span>编译</span></li><li data-step="6"><b>6</b><span>预览提交</span></li>
+      </ol>
+      <form id="wizard-form" class="wizard-body">
+        <section class="wizard-page" data-page="1">
+          <div class="wizard-copy"><span class="step-label">STEP 01</span><h3>选择已检查的模型</h3><p>ONNX 必须先通过隔离解析；IR、opset、输入输出和 external data 都会被冻结到模型版本。</p></div>
+          <label>模型版本<select id="wizard-model" required><option value="">选择模型</option></select></label>
+          <div id="wizard-model-info" class="inspection-card empty-state">请选择模型</div>
+        </section>
+        <section class="wizard-page hidden" data-page="2">
+          <div class="wizard-copy"><span class="step-label">STEP 02</span><h3>目标平台</h3><p>平台 Profile 是不可绕过的能力边界；切换平台会重置不合法的 Core 与 L2M。</p></div>
+          <div id="profile-cards" class="profile-cards"></div>
+          <input id="wizard-profile" type="hidden" required>
+          <div id="profile-locks" class="lock-grid"></div>
+        </section>
+        <section class="wizard-page hidden" data-page="3">
+          <div class="wizard-copy"><span class="step-label">STEP 03</span><h3>输入配置</h3><p>字段由 ONNX 结构生成。NV12 要求宽高为偶数，归一化参数数量必须与通道一致。</p></div>
+          <div class="form-grid three"><label>输入节点<input id="input-name" readonly></label><label>目标 Shape<input id="target-shape" required placeholder="1,3,224,224"></label><label>训练布局<select id="train-layout"><option>NCHW</option><option>NHWC</option></select></label><label>训练输入<select id="train-type"><option value="rgb">RGB</option><option value="bgr">BGR</option><option value="gray">Gray</option></select></label><label>Runtime 输入<select id="runtime-type"><option value="nv12">NV12</option><option value="rgb">RGB</option><option value="bgr">BGR</option><option value="yuv444">YUV444</option><option value="gray">Gray</option><option value="featuremap">Featuremap</option></select></label><label>Mean<input id="input-mean" placeholder="123.675,116.28,103.53"></label><label>Scale<input id="input-scale" placeholder="0.0171,0.0175,0.0174"></label><label>Std（可选）<input id="input-std" placeholder="留空"></label></div>
+        </section>
+        <section class="wizard-page hidden" data-page="4">
+          <div class="wizard-copy"><span class="step-label">STEP 04</span><h3>校准数据与预处理</h3><p>选择冻结的校准版本，并检查第一份样本的中心裁剪结果和归一化统计。</p></div>
+          <div class="form-grid three"><label>校准版本<select id="wizard-calibration" required><option value="">选择已定稿版本</option></select></label><label>使用样本数<input id="sample-limit" type="number" min="20" max="100" value="20"></label><label>校准算法<select id="calibration-algorithm"><option value="default">default</option><option value="mix">mix</option><option value="kl">kl</option><option value="max">max</option></select></label><label>Recipe<select id="recipe-id"><option value="image-center-crop">Center crop</option><option value="imagenet-resnet18">ImageNet ResNet18</option></select></label><label>短边 Resize<input id="resize-short" type="number" min="1" max="16384" value="256"></label><label>Recipe Mean<input id="recipe-mean" value="0.485,0.456,0.406"></label><label>Recipe Std<input id="recipe-std" value="0.229,0.224,0.225"></label></div>
+          <div id="calibration-preview" class="preview-grid"><div class="preview-frame"><span>原图</span><img id="preview-original" alt="第一份校准原图"></div><div class="preview-frame"><span>处理后</span><canvas id="preview-processed" width="224" height="224"></canvas></div><div id="preview-stats" class="preview-stats"><span>选择校准版本后生成预览</span></div></div>
+        </section>
+        <section class="wizard-page hidden" data-page="5">
+          <div class="wizard-copy"><span class="step-label">STEP 05</span><h3>编译参数</h3><p>S100 固定单核与 L2M=0；S600 可使用双核和自动 L2M。高级项只开放白名单字段。</p></div>
+          <div class="form-grid three"><label>输出前缀<input id="output-prefix" value="resnet18_224x224_nv12" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" required></label><label>编译模式<select id="compile-mode"><option value="latency">latency</option><option value="bandwidth">bandwidth</option><option value="balance">balance</option></select></label><label>Balance factor<input id="balance-factor" type="number" min="0" max="100" disabled></label><label>Core 数<select id="core-num"><option value="1">1</option><option value="2">2</option></select></label><label>L2M<select id="l2m-mode"><option value="0">关闭（0）</option><option value="auto">自动</option><option value="custom">自定义</option></select></label><label id="l2m-custom-field" class="hidden">L2M bytes<input id="l2m-custom" type="number" min="0" max="25165824" value="0"></label><label>优化级别<select id="optimize-level"><option value="O2">O2</option><option value="O1">O1</option><option value="O0">O0（调试）</option></select></label><label>Jobs<input id="jobs" type="number" min="1" max="128" value="8"></label></div>
+        </section>
+        <section class="wizard-page hidden" data-page="6">
+          <div class="wizard-copy"><span class="step-label">STEP 06</span><h3>YAML 预览与提交</h3><p>系统会再次校验资产哈希、Profile 约束和交叉字段，然后冻结请求、镜像 ID 与 YAML。</p></div>
+          <div id="preview-warnings" class="warning-list"></div>
+          <div class="yaml-toolbar"><span><i class="source-dot system"></i>系统路径 <i class="source-dot profile"></i>Profile 锁定 <i class="source-dot user"></i>用户配置</span><button id="refresh-yaml" class="button ghost small" type="button">重新校验</button></div>
+          <pre id="yaml-preview" class="code-block">进入本步骤后生成 YAML…</pre>
+          <label class="confirm-row"><input id="confirm-snapshot" type="checkbox" required><span>我已确认模型输入、预处理和目标平台；提交后该 Run 配置不可修改。</span></label>
+        </section>
+      </form>
+      <footer class="dialog-footer"><button id="wizard-back" class="button ghost hidden" type="button">上一步</button><span class="dialog-spacer"></span><button id="wizard-next" class="button primary" type="button">下一步</button><button id="wizard-submit" class="button primary hidden" type="button">提交转换</button></footer>
+    </div>
+  </dialog>
+
+  <dialog id="run-dialog" class="sheet-dialog run-dialog">
+    <div class="dialog-shell">
+      <header class="dialog-header run-header"><div><span id="run-kind" class="eyebrow">Conversion</span><h2 id="run-title">任务详情</h2><p id="run-subtitle"></p></div><div class="run-actions"><span id="run-status" class="status-pill neutral">—</span><button id="cancel-run" class="button danger hidden" type="button">取消</button><button id="retry-run" class="button secondary hidden" type="button">按快照重试</button><a id="export-run" class="button primary hidden" href="#">导出完整包</a><button class="close-button" data-close="run-dialog" type="button" aria-label="关闭">×</button></div></header>
+      <div id="run-stepper" class="run-stepper"></div>
+      <nav class="tabbar" aria-label="任务详情标签"><button class="active" data-run-tab="overview" type="button">概览</button><button data-run-tab="logs" type="button">实时日志</button><button data-run-tab="config" type="button">配置快照</button><button data-run-tab="artifacts" type="button">产物</button></nav>
+      <div class="run-body">
+        <section id="run-overview-tab" class="run-tab"></section>
+        <section id="run-logs-tab" class="run-tab hidden"><div class="log-toolbar"><button id="pause-logs" class="button ghost small" type="button">暂停</button><label class="checkbox-label"><input id="auto-scroll" type="checkbox" checked> 自动滚动</label><label class="log-search">搜索<input id="log-search" type="search" placeholder="错误码或关键字"></label><a id="download-log" class="button ghost small" href="#">下载原始日志</a></div><div id="log-viewer" class="log-viewer" aria-live="polite"></div></section>
+        <section id="run-config-tab" class="run-tab hidden"><div class="snapshot-grid"><div><h3>生成 YAML</h3><pre id="run-yaml" class="code-block"></pre></div><div><h3>规范化请求</h3><pre id="run-request" class="code-block"></pre></div></div></section>
+        <section id="run-artifacts-tab" class="run-tab hidden"><div id="artifact-list" class="artifact-list"></div><div id="report-preview" class="report-preview hidden"><div class="report-head"><strong>受限报告预览</strong><button id="close-report" class="button ghost small" type="button">关闭</button></div><iframe id="report-frame" title="OpenExplorer 报告" sandbox></iframe></div></section>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="preflight-dialog" class="modal-dialog">
+    <div class="modal-shell"><header class="dialog-header"><div><span class="eyebrow">System preflight</span><h2>本地环境预检</h2><p>不会静默拉取镜像，也不会向外部发送模型数据。</p></div><button class="close-button" data-close="preflight-dialog" type="button" aria-label="关闭">×</button></header><div id="preflight-details" class="preflight-details"></div><footer class="dialog-footer"><button id="rerun-smoke" class="button secondary" type="button">运行 Runner Smoke Test</button><span class="dialog-spacer"></span><button class="button ghost" data-close="preflight-dialog" type="button">完成</button></footer></div>
+  </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/static/app.js" defer></script>

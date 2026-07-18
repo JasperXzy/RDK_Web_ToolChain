@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Integer,
@@ -98,6 +99,8 @@ class ModelVersion(Base):
         String(32), nullable=False, default="PENDING_INSPECTION"
     )
     inspection: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    inspection_run_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    inspected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     model: Mapped[Model] = relationship(back_populates="versions")
@@ -187,8 +190,18 @@ class ConversionRun(Base):
     calibration_version_id: Mapped[str | None] = mapped_column(
         ForeignKey("calibration_versions.id", ondelete="SET NULL"), index=True
     )
+    kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="CONVERSION", index=True
+    )
     profile_id: Mapped[str] = mapped_column(String(128), nullable=False)
     profile_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    runner_image_reference: Mapped[str | None] = mapped_column(String(512))
+    runner_image_id: Mapped[str | None] = mapped_column(String(128))
+    contract_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1.0")
+    app_version: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="0.1.0.dev0"
+    )
+    generated_yaml: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     request_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(128))
@@ -213,11 +226,14 @@ class Attempt(Base):
     )
     number: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False, default="QUEUED")
     container_id: Mapped[str | None] = mapped_column(String(128))
     exit_code: Mapped[int | None] = mapped_column(Integer)
     result_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recovered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     run: Mapped[ConversionRun] = relationship(back_populates="attempts")

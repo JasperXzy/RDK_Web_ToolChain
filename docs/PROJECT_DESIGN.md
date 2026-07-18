@@ -2144,6 +2144,10 @@ docker compose up -d
 
 退出条件：PRD P0 验收场景全部通过。
 
+实施状态（2026-07-19）：上述 M2 交付项已经完成，八个 P0 验收场景已映射到自动化测试和
+显式 OpenExplorer Golden；状态机、恢复边界与 Web 安全决策见
+[ADR-014：M2 持久任务编排与 Web 产品闭环](./adr/ADR-014-m2-orchestration-and-web-product.md)。
+
 ### M3：验证、比较与 GPU
 
 交付：
@@ -2191,6 +2195,8 @@ M1 已完成 ResNet18 在 S100/S600 上的真实 `hb_compile check/compile`、�
 [ADR-012：OpenExplorer 3.7.0 M1 ResNet18 基线](./adr/ADR-012-openexplorer-3.7-m1-baseline.md)。
 项目/资产目录的第一组 M2 决策见
 [ADR-013：M2 项目与资产目录纵向闭环](./adr/ADR-013-m2-project-asset-catalog.md)。
+持久队列、模型检查、日志、恢复与结果导出的完整 M2 决策见
+[ADR-014：M2 持久任务编排与 Web 产品闭环](./adr/ADR-014-m2-orchestration-and-web-product.md)。
 当前仍需验证的项目如下。
 
 1. CPU 镜像已验证为 Python 3.10.12；GPU 镜像的 Runner 依赖仍待验证。

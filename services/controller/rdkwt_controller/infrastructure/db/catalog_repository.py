@@ -21,6 +21,19 @@ from .models import (
     Project,
 )
 
+ACTIVE_RUN_STATUSES = {
+    "QUEUED",
+    "PROVISIONING",
+    "RUNNING",
+    "INSPECTING",
+    "CHECKING",
+    "PREPROCESSING",
+    "COMPILING",
+    "VERIFYING",
+    "COLLECTING",
+    "CANCELLING",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ConversionInputs:
@@ -28,10 +41,22 @@ class ConversionInputs:
     model_version_id: str
     model_path: str
     model_sha256: str
+    model_inspection: dict[str, Any]
     calibration_version_id: str
     calibration_path: str
     calibration_manifest_path: str
     calibration_manifest_sha256: str
+    calibration_sample_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ModelInspectionInput:
+    project_id: str
+    model_version_id: str
+    model_path: str
+    model_sha256: str
+    compatibility_status: str
+    inspection_run_id: str | None
 
 
 class CatalogRepository:
@@ -99,17 +124,28 @@ class CatalogRepository:
     def project_deletion_preview(self, project_id: str) -> dict[str, Any]:
         project = self.get_project(project_id)
         run_count = sum(project["run_statuses"].values())
+        active_run_count = sum(
+            count
+            for status, count in project["run_statuses"].items()
+            if status in ACTIVE_RUN_STATUSES
+        )
+        with self._session_factory() as session:
+            run_ids = session.scalars(
+                select(ConversionRun.id).where(ConversionRun.project_id == project_id)
+            ).all()
         return {
             "project_id": project_id,
             "model_count": project["model_count"],
             "calibration_set_count": project["calibration_set_count"],
             "run_count": run_count,
+            "active_run_count": active_run_count,
+            "run_ids": run_ids,
             "disk_usage_bytes": project["disk_usage_bytes"],
-            "can_delete": run_count == 0,
+            "can_delete": active_run_count == 0,
             "blocked_reason": (
                 None
-                if run_count == 0
-                else "projects with conversion history cannot be deleted in the current M2 scope"
+                if active_run_count == 0
+                else "projects with queued or running tasks cannot be deleted"
             ),
         }
 
@@ -130,15 +166,22 @@ class CatalogRepository:
             )
             if project is None:
                 raise KeyError(f"unknown project: {project_id}")
-            run_count = session.scalar(
+            active_run_count = session.scalar(
                 select(func.count(ConversionRun.id)).where(
-                    ConversionRun.project_id == project_id
+                    ConversionRun.project_id == project_id,
+                    ConversionRun.status.in_(ACTIVE_RUN_STATUSES),
                 )
             )
-            if run_count:
+            if active_run_count:
                 raise ValueError(
-                    "projects with conversion history cannot be deleted in the current M2 scope"
+                    "projects with queued or running tasks cannot be deleted"
                 )
+            runs = session.scalars(
+                select(ConversionRun).where(ConversionRun.project_id == project_id)
+            ).all()
+            run_ids = [run.id for run in runs]
+            for run in runs:
+                session.delete(run)
             assets = {
                 version.asset.id: version.asset
                 for model in project.models
@@ -187,6 +230,7 @@ class CatalogRepository:
                 "deleted": True,
                 "blob_keys": removable_blob_keys,
                 "calibration_version_ids": version_ids,
+                "run_ids": run_ids,
             }
 
     def create_model(
@@ -239,6 +283,63 @@ class CatalogRepository:
             )
             if row is None:
                 raise KeyError(f"unknown model version: {version_id}")
+            return self._serialize_model_version(row)
+
+    def model_inspection_input(self, version_id: str) -> ModelInspectionInput:
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(ModelVersion)
+                .where(ModelVersion.id == version_id)
+                .options(selectinload(ModelVersion.asset), selectinload(ModelVersion.model))
+            )
+            if row is None:
+                raise KeyError(f"unknown model version: {version_id}")
+            return ModelInspectionInput(
+                project_id=row.model.project_id,
+                model_version_id=row.id,
+                model_path=row.asset.blob_key,
+                model_sha256=row.asset.sha256,
+                compatibility_status=row.compatibility_status,
+                inspection_run_id=row.inspection_run_id,
+            )
+
+    def set_model_inspection(
+        self,
+        version_id: str,
+        *,
+        run_id: str,
+        status: str,
+        inspection: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self._session_factory.begin() as session:
+            row = session.scalar(
+                select(ModelVersion)
+                .where(ModelVersion.id == version_id)
+                .options(selectinload(ModelVersion.asset), selectinload(ModelVersion.model))
+            )
+            if row is None:
+                raise KeyError(f"unknown model version: {version_id}")
+            row.compatibility_status = status
+            row.inspection = inspection
+            row.inspection_run_id = run_id
+            row.inspected_at = datetime.now(UTC)
+            session.flush()
+            return self._serialize_model_version(row)
+
+    def mark_model_inspection_pending(
+        self, version_id: str, *, run_id: str
+    ) -> dict[str, Any]:
+        with self._session_factory.begin() as session:
+            row = session.scalar(
+                select(ModelVersion)
+                .where(ModelVersion.id == version_id)
+                .options(selectinload(ModelVersion.asset), selectinload(ModelVersion.model))
+            )
+            if row is None:
+                raise KeyError(f"unknown model version: {version_id}")
+            row.compatibility_status = "INSPECTING"
+            row.inspection_run_id = run_id
+            session.flush()
             return self._serialize_model_version(row)
 
     def create_calibration_set(
@@ -335,6 +436,28 @@ class CatalogRepository:
                 raise KeyError(f"unknown calibration version: {version_id}")
             return self._serialize_calibration_version(row, include_samples=True)
 
+    def calibration_sample_input(
+        self, version_id: str, ordinal: int
+    ) -> dict[str, Any]:
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(CalibrationSample)
+                .where(
+                    CalibrationSample.calibration_version_id == version_id,
+                    CalibrationSample.ordinal == ordinal,
+                )
+                .options(selectinload(CalibrationSample.asset))
+            )
+            if row is None:
+                raise KeyError(f"unknown calibration sample: {version_id}/{ordinal}")
+            return {
+                "original_filename": row.original_filename,
+                "blob_key": row.asset.blob_key,
+                "sha256": row.asset.sha256,
+                "size_bytes": row.asset.size_bytes,
+                "mime_type": row.asset.mime_type,
+            }
+
     def calibration_materialization_input(self, version_id: str) -> dict[str, Any]:
         with self._session_factory() as session:
             row = session.scalar(
@@ -414,6 +537,12 @@ class CatalogRepository:
                 raise KeyError(f"unknown calibration version: {calibration_version_id}")
             if model_version.model.project_id != calibration_version.calibration_set.project_id:
                 raise ValueError("model and calibration versions must belong to the same project")
+            if model_version.compatibility_status != "READY" or not model_version.inspection:
+                raise ValueError(
+                    "model version must pass isolated ONNX inspection before conversion"
+                )
+            if model_version.inspection.get("sha256") != model_version.asset.sha256:
+                raise ValueError("model inspection no longer matches the registered asset")
             if calibration_version.status != "READY" or calibration_version.source_path is None:
                 raise ValueError("calibration version must be finalized before conversion")
             if not 20 <= calibration_version.sample_count <= 100:
@@ -428,10 +557,12 @@ class CatalogRepository:
                 model_version_id=model_version.id,
                 model_path=model_version.asset.blob_key,
                 model_sha256=model_version.asset.sha256,
+                model_inspection=model_version.inspection,
                 calibration_version_id=calibration_version.id,
                 calibration_path=calibration_version.source_path,
                 calibration_manifest_path=calibration_version.manifest_key,
                 calibration_manifest_sha256=calibration_version.manifest_sha256,
+                calibration_sample_count=calibration_version.sample_count,
             )
 
     @staticmethod
@@ -509,6 +640,7 @@ class CatalogRepository:
             "model_count": len(row.models),
             "calibration_set_count": len(row.calibration_sets),
             "run_statuses": run_statuses,
+            "run_count": sum(run_statuses.values()),
             "disk_usage_bytes": sum(assets.values()),
             "created_at": row.created_at.isoformat(),
             "updated_at": row.updated_at.isoformat(),
@@ -540,6 +672,10 @@ class CatalogRepository:
             "format": row.format,
             "compatibility_status": row.compatibility_status,
             "inspection": row.inspection,
+            "inspection_run_id": row.inspection_run_id,
+            "inspected_at": (
+                None if row.inspected_at is None else row.inspected_at.isoformat()
+            ),
             "asset": {
                 "id": row.asset.id,
                 "sha256": row.asset.sha256,

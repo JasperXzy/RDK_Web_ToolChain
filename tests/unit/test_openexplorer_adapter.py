@@ -9,6 +9,7 @@ import yaml
 from rdkwt_controller.profiles import ProfileRegistry
 from rdkwt_runner.adapters.openexplorer_v3_7 import (
     OpenExplorer370Adapter,
+    parse_quantized_cosines,
     parse_static_metrics,
     render_openexplorer_config,
     validate_configuration,
@@ -143,6 +144,29 @@ def test_static_performance_golden_parser(
     assert metrics["l2m_bytes_per_run"] == l2m_bytes
 
 
+def test_quantized_cosine_table_parser() -> None:
+    metrics = parse_quantized_cosines(
+        """
+| Node | NodeType | ON | Threshold | Calibrated Cosine | Quantized Cosine | Output Data Type |
+| Conv_0 | Conv | BPU | 2.0 | 0.99 | 0.91 | si8 |
+| Relu_1 | Relu | BPU | -- | 0.98 | 0.87 | si8 |
+| TensorName | Calibrated Cosine | Quantized Cosine |
+| output | 0.98 | 0.94 |
+"""
+    )
+
+    assert metrics["node_count"] == 2
+    assert metrics["minimum_node"] == {
+        "name": "Relu_1",
+        "type": "Relu",
+        "device": "BPU",
+        "quantized_cosine": 0.87,
+    }
+    assert metrics["output_cosines"] == [
+        {"name": "output", "quantized_cosine": 0.94}
+    ]
+
+
 def test_preprocess_writes_deterministic_npy_manifest_and_yaml(tmp_path: Path) -> None:
     np = pytest.importorskip("numpy")
     image_module = pytest.importorskip("PIL.Image")
@@ -171,7 +195,7 @@ def test_preprocess_writes_deterministic_npy_manifest_and_yaml(tmp_path: Path) -
 
     details = adapter.preprocess()
     manifest = json.loads(adapter.calibration_manifest_path.read_text())
-    outputs = sorted(adapter.calibration_root.glob("*.bgr.npy"))
+    outputs = sorted(adapter.calibration_root.glob("*.rgb.npy"))
     generated = yaml.safe_load(adapter.generated_config.read_text())
 
     assert details["sample_count"] == 20

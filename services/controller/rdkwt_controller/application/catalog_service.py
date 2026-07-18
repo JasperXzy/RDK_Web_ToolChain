@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from collections.abc import AsyncIterable, Callable
 from pathlib import Path
 from typing import Any, TypeVar
+from uuid import UUID
 
 from rdkwt_controller.infrastructure.assets import AssetStore, AssetStoreError
 from rdkwt_controller.infrastructure.db import CatalogRepository
@@ -41,9 +43,16 @@ def _clean_text(
 
 
 class CatalogService:
-    def __init__(self, *, repository: CatalogRepository, asset_store: AssetStore) -> None:
+    def __init__(
+        self,
+        *,
+        repository: CatalogRepository,
+        asset_store: AssetStore,
+        runs_root: Path | None = None,
+    ) -> None:
         self.repository = repository
         self.asset_store = asset_store
+        self.runs_root = None if runs_root is None else runs_root.resolve(strict=True)
 
     def create_project(self, *, name: str, description: str) -> dict[str, Any]:
         return self.repository.create_project(
@@ -87,9 +96,14 @@ class CatalogService:
         )
 
     def project_deletion_preview(self, project_id: str) -> dict[str, Any]:
-        return self._project_operation(
+        preview = self._project_operation(
             lambda: self.repository.project_deletion_preview(project_id)
         )
+        run_ids = preview.pop("run_ids")
+        run_disk_bytes = sum(self._run_directory_size(run_id) for run_id in run_ids)
+        preview["run_disk_usage_bytes"] = run_disk_bytes
+        preview["disk_usage_bytes"] += run_disk_bytes
+        return preview
 
     def delete_project(self, project_id: str, *, confirmation: str) -> dict[str, Any]:
         if confirmation != project_id:
@@ -109,10 +123,38 @@ class CatalogService:
                 blob_keys=deleted.pop("blob_keys"),
                 version_ids=deleted.pop("calibration_version_ids"),
             )
+            for run_id in deleted.pop("run_ids"):
+                self._delete_run_directory(run_id)
         except (AssetStoreError, OSError) as exc:
             logger.exception("project metadata was deleted but asset cleanup failed")
             deleted["cleanup_warning"] = str(exc)
         return deleted
+
+    def _run_directory_size(self, run_id: str) -> int:
+        if self.runs_root is None:
+            return 0
+        path = self.runs_root / run_id
+        if not path.is_dir() or path.is_symlink():
+            return 0
+        return sum(
+            item.stat().st_size
+            for item in path.rglob("*")
+            if item.is_file() and not item.is_symlink()
+        )
+
+    def _delete_run_directory(self, run_id: str) -> None:
+        if self.runs_root is None:
+            return
+        try:
+            parsed = str(UUID(run_id))
+        except ValueError as exc:
+            raise AssetStoreError("RUN_PATH_INVALID", "run ID is invalid") from exc
+        path = self.runs_root / parsed
+        if not path.exists():
+            return
+        if path.is_symlink() or not path.is_dir():
+            raise AssetStoreError("RUN_PATH_INVALID", "run path is not a regular directory")
+        shutil.rmtree(path)
 
     async def upload_model(
         self,
@@ -224,6 +266,30 @@ class CatalogService:
         except KeyError as exc:
             raise CatalogError("CALIBRATION_VERSION_NOT_FOUND", str(exc), status_code=404) from exc
 
+    def calibration_sample_file(
+        self, version_id: str, ordinal: int
+    ) -> tuple[Path, dict[str, Any]]:
+        if ordinal < 0 or ordinal >= 100:
+            raise CatalogError(
+                "CALIBRATION_SAMPLE_NOT_FOUND",
+                "calibration sample ordinal is outside the supported range",
+                status_code=404,
+            )
+        try:
+            metadata = self.repository.calibration_sample_input(version_id, ordinal)
+            path = self.asset_store.resolve_verified_blob(
+                metadata["blob_key"],
+                sha256=metadata["sha256"],
+                size_bytes=metadata["size_bytes"],
+            )
+        except KeyError as exc:
+            raise CatalogError(
+                "CALIBRATION_SAMPLE_NOT_FOUND", str(exc), status_code=404
+            ) from exc
+        except AssetStoreError as exc:
+            raise self._asset_error(exc) from exc
+        return path, metadata
+
     def finalize_calibration_version(self, version_id: str) -> dict[str, Any]:
         try:
             source = self.repository.calibration_materialization_input(version_id)
@@ -280,6 +346,7 @@ class CatalogService:
             "BLOB_INTEGRITY_FAILED",
             "BLOB_PATH_INVALID",
             "CALIBRATION_PATH_INVALID",
+            "RUN_PATH_INVALID",
         }:
             status_code = 500
         return CatalogError(exc.code, str(exc), status_code=status_code)
