@@ -99,8 +99,10 @@ def _validate_request(payload: Any) -> dict[str, Any]:
         "openexplorer-3.7.0",
     }:
         raise ValueError(f"unsupported adapter: {payload['adapter']!r}")
-    if payload["runner_mode"] != "cpu":
-        raise ValueError("the CPU Runner only accepts runner_mode=cpu")
+    if payload["runner_mode"] not in {"cpu", "gpu"}:
+        raise ValueError("runner_mode must be cpu or gpu")
+    if payload["runner_mode"] == "gpu" and payload["adapter"] != "openexplorer-3.7.0":
+        raise ValueError("GPU mode is only available for the OpenExplorer adapter")
     pipeline = payload["pipeline"]
     if not isinstance(pipeline, list) or not pipeline or len(pipeline) != len(set(pipeline)):
         raise ValueError("pipeline must be a non-empty list of unique steps")
@@ -108,14 +110,12 @@ def _validate_request(payload: Any) -> dict[str, Any]:
         raise ValueError("pipeline contains unsupported steps")
     if "collect" not in pipeline:
         raise ValueError("pipeline must include collect")
-    if payload["adapter"] == "openexplorer-3.7.0" and pipeline != [
-        "inspect",
-        "check",
-        "preprocess",
-        "compile",
-        "collect",
-    ]:
-        raise ValueError("the OpenExplorer 3.7.0 M1 adapter requires the complete ordered pipeline")
+    openexplorer_pipelines = {
+        ("inspect", "check", "preprocess", "compile", "collect"),
+        ("inspect", "check", "preprocess", "compile", "verify", "collect"),
+    }
+    if payload["adapter"] == "openexplorer-3.7.0" and tuple(pipeline) not in openexplorer_pipelines:
+        raise ValueError("the OpenExplorer 3.7.0 adapter requires the complete ordered pipeline")
     if payload["adapter"] == "onnx-inspection-1.0" and pipeline != [
         "inspect",
         "collect",

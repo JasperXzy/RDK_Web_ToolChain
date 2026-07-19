@@ -216,9 +216,7 @@ def test_conversion_submission_writes_normalized_s600_request(settings) -> None:
     preview = app.state.services.catalog_service.project_deletion_preview(project["id"])
     assert preview["can_delete"] is False
     with pytest.raises(CatalogError, match="queued or running"):
-        app.state.services.catalog_service.delete_project(
-            project["id"], confirmation=project["id"]
-        )
+        app.state.services.catalog_service.delete_project(project["id"], confirmation=project["id"])
 
 
 def test_conversion_submission_rejects_s100_dual_core(settings) -> None:
@@ -251,6 +249,63 @@ def test_conversion_request_rejects_boolean_integer_fields() -> None:
                 "core_num": True,
             }
         )
+
+
+def test_successful_conversion_runs_can_be_compared(
+    settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    model_id = str(uuid.uuid4())
+    run_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    details = {}
+    for index, run_id in enumerate(run_ids):
+        details[run_id] = {
+            "id": run_id,
+            "kind": "CONVERSION",
+            "status": "SUCCEEDED",
+            "model_version_id": model_id,
+            "calibration_version_id": str(uuid.uuid4()),
+            "profile_id": "s100-oe-3.7.0",
+            "runner_mode": "cpu",
+            "cache": {"key": "a" * 64, "hit": bool(index)},
+            "request": {
+                "configuration": {
+                    "calibration": {
+                        "source_type": "images",
+                        "algorithm": "default",
+                        "sample_limit": 20,
+                    },
+                    "compiler": {
+                        "compile_mode": "latency",
+                        "core_num": 1,
+                        "optimize_level": "O2",
+                        "max_l2m_size": 0,
+                    },
+                }
+            },
+            "summary": {
+                "hbm": {"size_bytes": 1_000 + index},
+                "static_performance": {
+                    "fps": 100 + index,
+                    "latency_us": 10_000 - index,
+                },
+                "quantization": {"minimum_node": {"quantized_cosine": 0.99 - index * 0.01}},
+                "verification": {
+                    "hbruntime": {"duration_ms": 10 + index},
+                    "hb_verifier": {"minimum_cosine": {"cosine_similarity": 0.98 - index * 0.01}},
+                },
+                "total_duration_ms": 1_000 + index,
+            },
+        }
+    service = app.state.services.run_service
+    monkeypatch.setattr(service, "result_detail", lambda run_id: details[run_id])
+
+    comparison = service.compare_runs(run_ids)
+
+    assert comparison["model_version_id"] == model_id
+    assert comparison["common"]["profile_id"] == "s100-oe-3.7.0"
+    assert comparison["differences"]["fps"] == [100, 101]
+    assert comparison["differences"]["cache_hit"] == [False, True]
 
 
 def test_project_mutations_require_csrf_and_catalog_upload_deduplicates(settings) -> None:
@@ -309,9 +364,7 @@ def test_calibration_finalize_writes_immutable_manifest(settings) -> None:
     app = create_app(settings, docker_client=FakeDockerClient())
     _project, _model, calibration = asyncio.run(_prepare_catalog(app))
 
-    manifest_path = (
-        settings.assets_dir / "calibration-sets" / calibration["id"] / "manifest.json"
-    )
+    manifest_path = settings.assets_dir / "calibration-sets" / calibration["id"] / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     source_files = list(manifest_path.parent.joinpath("source").iterdir())
 
@@ -346,9 +399,7 @@ def test_calibration_finalize_rolls_back_materialization_on_metadata_failure(
     def fail_metadata_update(*_args, **_kwargs):
         raise RuntimeError("simulated metadata failure")
 
-    monkeypatch.setattr(
-        service.repository, "finalize_calibration_version", fail_metadata_update
-    )
+    monkeypatch.setattr(service.repository, "finalize_calibration_version", fail_metadata_update)
 
     with pytest.raises(RuntimeError, match="simulated metadata failure"):
         service.finalize_calibration_version(version_id)
@@ -444,6 +495,30 @@ def test_npy_archive_import_validates_and_freezes_metadata(settings) -> None:
     assert all(item["materialized_name"].endswith(".npy") for item in manifest["samples"])
 
 
+def test_rank_one_model_can_register_scalar_batch_free_npy(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    service = app.state.services.catalog_service
+    project = service.create_project(name="Scalar input", description="M3")
+    calibration_set = service.create_calibration_set(
+        project_id=project["id"], name="Scalar tensors", description="", source_type="npy"
+    )
+    version_id = calibration_set["versions"][0]["id"]
+    payload = _npy_bytes(shape=(), value=3.5)
+
+    sample = asyncio.run(
+        service.upload_calibration_sample(
+            version_id=version_id,
+            filename="scalar.npy",
+            content_length=len(payload),
+            chunks=_chunks(payload),
+        )
+    )
+
+    assert sample["validation"]["shape"] == []
+    assert sample["validation"]["element_count"] == 1
+    assert sample["validation"]["statistics"]["mean"] == 3.5
+
+
 def test_npy_import_rejects_unsafe_zip_and_inconsistent_shapes(settings) -> None:
     app = create_app(settings, docker_client=FakeDockerClient())
     service = app.state.services.catalog_service
@@ -469,9 +544,7 @@ def test_npy_import_rejects_unsafe_zip_and_inconsistent_shapes(settings) -> None
         project_id=project["id"], name="Corrupt", description="", source_type="npy"
     )
     corrupt_version = corrupt["versions"][0]["id"]
-    corrupt_zip = _zip_bytes(
-        [("00-valid.npy", _npy_bytes()), ("01-corrupt.npy", b"not-an-npy")]
-    )
+    corrupt_zip = _zip_bytes([("00-valid.npy", _npy_bytes()), ("01-corrupt.npy", b"not-an-npy")])
     with pytest.raises(CatalogError) as corrupt_error:
         asyncio.run(
             service.upload_calibration_archive(
@@ -625,10 +698,7 @@ def test_direct_npy_conversion_requires_batch_free_model_shape(settings) -> None
     )
     version_id = calibration_set["versions"][0]["id"]
     archive_payload = _zip_bytes(
-        [
-            (f"sample-{index:02d}.npy", _npy_bytes(shape=(3, 2, 2)))
-            for index in range(20)
-        ]
+        [(f"sample-{index:02d}.npy", _npy_bytes(shape=(3, 2, 2))) for index in range(20)]
     )
     asyncio.run(
         service.upload_calibration_archive(
@@ -654,6 +724,139 @@ def test_direct_npy_conversion_requires_batch_free_model_shape(settings) -> None
             sample_limit=20,
             jobs=8,
         )
+
+
+def test_multi_input_npy_archive_is_aligned_and_normalized(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    project, model, _image_calibration = asyncio.run(_prepare_catalog(app))
+    inspection = dict(model["inspection"])
+    inspection["inputs"] = [
+        {
+            "name": "data",
+            "shape": ["N", 3, "H", "W"],
+            "dtype": "FLOAT",
+            "dynamic": True,
+        },
+        {
+            "name": "aux",
+            "shape": [1, 4],
+            "dtype": "FLOAT",
+            "dynamic": False,
+        },
+    ]
+    model = app.state.services.catalog_service.repository.set_model_inspection(
+        model["id"],
+        run_id=str(uuid.uuid4()),
+        status="READY",
+        inspection=inspection,
+    )
+    service = app.state.services.catalog_service
+    calibration_set = service.create_calibration_set(
+        project_id=project["id"],
+        name="Aligned multi-input",
+        description="M3",
+        source_type="npy_multi",
+    )
+    version_id = calibration_set["versions"][0]["id"]
+    archive_payload = _zip_bytes(
+        [
+            (f"data/sample-{index:02d}.npy", _npy_bytes(shape=(3, 2, 2), value=index))
+            for index in range(20)
+        ]
+        + [
+            (f"aux/sample-{index:02d}.npy", _npy_bytes(shape=(4,), value=index))
+            for index in range(20)
+        ]
+    )
+    imported = asyncio.run(
+        service.upload_calibration_archive(
+            version_id=version_id,
+            filename="multi-input.zip",
+            content_length=len(archive_payload),
+            chunks=_chunks(archive_payload),
+        )
+    )
+    calibration = service.finalize_calibration_version(version_id)
+
+    preview = app.state.services.run_service.preview_conversion(
+        profile_id="s100-oe-3.7.0",
+        model_version_id=model["id"],
+        calibration_version_id=calibration["id"],
+        output_prefix="multi_input",
+        core_num=1,
+        max_l2m_size=0,
+        compile_mode="latency",
+        balance_factor=None,
+        optimize_level="O2",
+        sample_limit=20,
+        jobs=8,
+        input_options=[
+            {
+                "name": "data",
+                "target_shape": [1, 3, 2, 2],
+                "train_type": "featuremap",
+                "train_layout": "NCHW",
+                "runtime_type": "featuremap",
+                "normalization": {},
+            },
+            {
+                "name": "aux",
+                "target_shape": [1, 4],
+                "train_type": "featuremap",
+                "train_layout": "NCHW",
+                "runtime_type": "featuremap",
+                "normalization": {},
+            },
+        ],
+        cache_mode="enable",
+    )
+
+    assert imported["imported_count"] == 20
+    assert imported["imported_file_count"] == 40
+    assert calibration["sample_count"] == 20
+    assert calibration["validation_report"]["physical_file_count"] == 40
+    assert {item["name"] for item in calibration["validation_report"]["inputs"]} == {
+        "data",
+        "aux",
+    }
+    assert preview["configuration"]["calibration"]["source_type"] == "npy_multi"
+    assert len(preview["configuration"]["inputs"]) == 2
+    assert len(preview["resource_snapshot"]["cache_key"]) == 64
+    assert "/data;" in preview["yaml"]
+    assert "/aux" in preview["yaml"]
+
+
+def test_multi_input_npy_archive_rejects_unaligned_samples_atomically(settings) -> None:
+    app = create_app(settings, docker_client=FakeDockerClient())
+    service = app.state.services.catalog_service
+    project = service.create_project(name="Unaligned", description="M3")
+    calibration_set = service.create_calibration_set(
+        project_id=project["id"],
+        name="Unaligned tensors",
+        description="",
+        source_type="npy_multi",
+    )
+    version_id = calibration_set["versions"][0]["id"]
+    archive_payload = _zip_bytes(
+        [
+            ("data/sample-00.npy", _npy_bytes()),
+            ("aux/different.npy", _npy_bytes(shape=(4,))),
+        ]
+    )
+
+    with pytest.raises(CatalogError) as captured:
+        asyncio.run(
+            service.upload_calibration_archive(
+                version_id=version_id,
+                filename="unaligned.zip",
+                content_length=len(archive_payload),
+                chunks=_chunks(archive_payload),
+            )
+        )
+
+    assert captured.value.code == "CALIBRATION_MULTI_INPUT_ALIGNMENT_INVALID"
+    assert service.get_calibration_version(version_id)["sample_count"] == 0
+    assert list((settings.assets_dir / "upload-staging").iterdir()) == []
 
 
 def test_project_delete_requires_confirmation_and_preserves_shared_blob(settings) -> None:
@@ -806,13 +1009,7 @@ def test_retry_uses_new_attempt_without_overwriting_snapshot(settings) -> None:
     assert cancelled["status"] == "CANCELLED"
     assert cancelled["attempts"][0]["status"] == "CANCELLED"
     retry = service.retry(submission.run_id)
-    second_request_path = (
-        settings.runs_dir
-        / submission.run_id
-        / "attempts"
-        / "2"
-        / "request.json"
-    )
+    second_request_path = settings.runs_dir / submission.run_id / "attempts" / "2" / "request.json"
     second_request = json.loads(second_request_path.read_text())
 
     assert retry.attempt == 2
@@ -913,8 +1110,6 @@ def test_successful_run_exports_reproducible_package_and_project_deletes_runs(
     preview = app.state.services.catalog_service.project_deletion_preview(project["id"])
     assert preview["can_delete"] is True
     assert preview["run_count"] == 1
-    app.state.services.catalog_service.delete_project(
-        project["id"], confirmation=project["id"]
-    )
+    app.state.services.catalog_service.delete_project(project["id"], confirmation=project["id"])
     assert repository.get(submission.run_id) is None
     assert not (settings.runs_dir / submission.run_id).exists()

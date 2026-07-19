@@ -25,12 +25,14 @@ def test_restricted_openexplorer_runner_contract(tmp_path) -> None:
     suffix = uuid.uuid4().hex[:12]
     assets_volume_name = f"rdkwt-it-assets-{suffix}"
     runs_volume_name = f"rdkwt-it-runs-{suffix}"
+    cache_volume_name = f"rdkwt-it-cache-{suffix}"
     image_ref = os.environ.get(
         "RDKWT_CPU_RUNNER_IMAGE",
         "rdk-webtoolchain/oe-runner-cpu:oe3.7.0-app0.1",
     )
     assets_volume = client.volumes.create(name=assets_volume_name)
     runs_volume = client.volumes.create(name=runs_volume_name)
+    cache_volume = client.volumes.create(name=cache_volume_name)
     run_id = str(uuid.uuid4())
     request = {
         "contract_version": "1.0",
@@ -64,6 +66,7 @@ def test_restricted_openexplorer_runner_contract(tmp_path) -> None:
         profile_dir=tmp_path,
         assets_volume=assets_volume_name,
         runs_volume=runs_volume_name,
+        cache_volume=cache_volume_name,
         cpu_runner_image=image_ref,
     )
     gateway = DockerGateway(client, settings)
@@ -113,3 +116,4 @@ def test_restricted_openexplorer_runner_contract(tmp_path) -> None:
             runner.remove(force=True, v=True)
         assets_volume.remove(force=True)
         runs_volume.remove(force=True)
+        cache_volume.remove(force=True)

@@ -10,7 +10,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, model_validator
 
 router = APIRouter()
 TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}
@@ -44,14 +44,10 @@ class InputOptionsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, min_length=1, max_length=256)
-    target_shape: list[StrictInt] | None = Field(
-        default=None, min_length=4, max_length=4
-    )
-    train_type: Literal["rgb", "bgr", "gray"] = "rgb"
+    target_shape: list[StrictInt] | None = Field(default=None, min_length=1, max_length=4)
+    train_type: Literal["rgb", "bgr", "gray", "yuv444", "featuremap"] = "rgb"
     train_layout: Literal["NCHW", "NHWC"] = "NCHW"
-    runtime_type: Literal["nv12", "rgb", "bgr", "yuv444", "gray", "featuremap"] = (
-        "nv12"
-    )
+    runtime_type: Literal["nv12", "rgb", "bgr", "yuv444", "gray", "featuremap"] = "nv12"
     normalization: NormalizationRequest = Field(default_factory=NormalizationRequest)
 
 
@@ -71,6 +67,13 @@ class CalibrationOptionsRequest(BaseModel):
     recipe: RecipeRequest | None = None
 
 
+class VerificationOptionsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["disabled", "basic"] = "basic"
+    compare_digits: StrictInt = Field(default=5, ge=1, le=12)
+
+
 class ConversionRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -84,9 +87,10 @@ class ConversionRunRequest(BaseModel):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
     )
     input: InputOptionsRequest | None = None
-    calibration: CalibrationOptionsRequest = Field(
-        default_factory=CalibrationOptionsRequest
-    )
+    inputs: list[InputOptionsRequest] | None = Field(default=None, min_length=1, max_length=4)
+    calibration: CalibrationOptionsRequest = Field(default_factory=CalibrationOptionsRequest)
+    verification: VerificationOptionsRequest = Field(default_factory=VerificationOptionsRequest)
+    runner_mode: Literal["cpu", "gpu"] = "cpu"
     core_num: StrictInt | None = Field(default=None, ge=1, le=2)
     max_l2m_size: StrictInt | Literal["auto"] | None = Field(default=None)
     compile_mode: Literal["latency", "bandwidth", "balance"] = "latency"
@@ -96,6 +100,12 @@ class ConversionRunRequest(BaseModel):
     jobs: StrictInt = Field(default=8, ge=1, le=128)
     max_time_per_fc: StrictInt = Field(default=0, ge=0, le=2**31 - 1)
     cache_mode: Literal["disable", "enable", "force_overwrite"] = "disable"
+
+    @model_validator(mode="after")
+    def validate_input_forms(self) -> ConversionRunRequest:
+        if self.input is not None and self.inputs is not None:
+            raise ValueError("use either input or inputs, not both")
+        return self
 
 
 class ProjectCreateRequest(BaseModel):
@@ -117,7 +127,19 @@ class CalibrationSetCreateRequest(BaseModel):
 
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=4000)
-    source_type: Literal["images", "npy"] = "images"
+    source_type: Literal["images", "npy", "npy_multi"] = "images"
+
+
+class RunComparisonRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_ids: list[UUID] = Field(min_length=2, max_length=4)
+
+    @model_validator(mode="after")
+    def validate_unique_runs(self) -> RunComparisonRequest:
+        if len(set(self.run_ids)) != len(self.run_ids):
+            raise ValueError("run_ids must be unique")
+        return self
 
 
 def _services(request: Request) -> object:
@@ -144,26 +166,25 @@ def _upload_filename(filename: str | None, filename_b64: str | None) -> str:
         except (binascii.Error, UnicodeDecodeError) as exc:
             raise HTTPException(status_code=400, detail="invalid X-Filename-B64") from exc
     if filename is None:
-        raise HTTPException(
-            status_code=400, detail="X-Filename or X-Filename-B64 is required"
-        )
+        raise HTTPException(status_code=400, detail="X-Filename or X-Filename-B64 is required")
     return filename
 
 
 def _conversion_kwargs(payload: ConversionRunRequest) -> dict[str, Any]:
+    input_options: dict[str, Any] | list[dict[str, Any]] | None
+    if payload.inputs is not None:
+        input_options = [item.model_dump(mode="json", exclude_none=True) for item in payload.inputs]
+    elif payload.input is not None:
+        input_options = payload.input.model_dump(mode="json", exclude_none=True)
+    else:
+        input_options = None
     return {
         "profile_id": payload.profile_id,
         "model_version_id": str(payload.model_version_id),
         "calibration_version_id": str(payload.calibration_version_id),
         "output_prefix": payload.output_prefix,
-        "input_options": (
-            None
-            if payload.input is None
-            else payload.input.model_dump(mode="json", exclude_none=True)
-        ),
-        "calibration_options": payload.calibration.model_dump(
-            mode="json", exclude_none=True
-        ),
+        "input_options": input_options,
+        "calibration_options": payload.calibration.model_dump(mode="json", exclude_none=True),
         "core_num": payload.core_num,
         "max_l2m_size": payload.max_l2m_size,
         "compile_mode": payload.compile_mode,
@@ -173,6 +194,8 @@ def _conversion_kwargs(payload: ConversionRunRequest) -> dict[str, Any]:
         "jobs": payload.jobs,
         "max_time_per_fc": payload.max_time_per_fc,
         "cache_mode": payload.cache_mode,
+        "verification_options": payload.verification.model_dump(mode="json"),
+        "runner_mode": payload.runner_mode,
     }
 
 
@@ -216,9 +239,7 @@ async def preflight(request: Request) -> dict[str, object]:
     "/api/v1/system/preflight/runner-smoke-test",
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def runner_smoke_test(
-    payload: RunnerSmokeTestRequest, request: Request
-) -> dict[str, object]:
+async def runner_smoke_test(payload: RunnerSmokeTestRequest, request: Request) -> dict[str, object]:
     services = _services(request)
     try:
         asset_path = services.system_service.ensure_runner_probe_asset()
@@ -249,9 +270,7 @@ async def projects(request: Request) -> list[dict[str, object]]:
 
 
 @router.post("/api/v1/projects", status_code=status.HTTP_201_CREATED)
-async def create_project(
-    payload: ProjectCreateRequest, request: Request
-) -> dict[str, object]:
+async def create_project(payload: ProjectCreateRequest, request: Request) -> dict[str, object]:
     return _services(request).catalog_service.create_project(
         name=payload.name, description=payload.description
     )
@@ -272,9 +291,7 @@ async def update_project(
 
 
 @router.get("/api/v1/projects/{project_id}/deletion-preview")
-async def project_deletion_preview(
-    project_id: str, request: Request
-) -> dict[str, object]:
+async def project_deletion_preview(project_id: str, request: Request) -> dict[str, object]:
     return _services(request).catalog_service.project_deletion_preview(project_id)
 
 
@@ -284,9 +301,7 @@ async def delete_project(
     request: Request,
     confirmation: Annotated[str, Header(alias="X-Confirm-Project")],
 ) -> dict[str, object]:
-    return _services(request).catalog_service.delete_project(
-        project_id, confirmation=confirmation
-    )
+    return _services(request).catalog_service.delete_project(project_id, confirmation=confirmation)
 
 
 @router.get("/api/v1/projects/{project_id}/models")
@@ -294,9 +309,7 @@ async def project_models(project_id: str, request: Request) -> list[dict[str, ob
     return _services(request).catalog_service.list_models(project_id)
 
 
-@router.post(
-    "/api/v1/projects/{project_id}/models", status_code=status.HTTP_201_CREATED
-)
+@router.post("/api/v1/projects/{project_id}/models", status_code=status.HTTP_201_CREATED)
 async def upload_model(
     project_id: str,
     request: Request,
@@ -325,9 +338,7 @@ async def model_version(version_id: str, request: Request) -> dict[str, object]:
 async def inspect_model_version(version_id: str, request: Request) -> dict[str, object]:
     services = _services(request)
     try:
-        submission = services.run_service.submit_model_inspection(
-            model_version_id=version_id
-        )
+        submission = services.run_service.submit_model_inspection(model_version_id=version_id)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     services.orchestrator.enqueue(submission.run_id, submission.attempt)
@@ -335,9 +346,7 @@ async def inspect_model_version(version_id: str, request: Request) -> dict[str, 
 
 
 @router.get("/api/v1/projects/{project_id}/calibration-sets")
-async def project_calibration_sets(
-    project_id: str, request: Request
-) -> list[dict[str, object]]:
+async def project_calibration_sets(project_id: str, request: Request) -> list[dict[str, object]]:
     return _services(request).catalog_service.list_calibration_sets(project_id)
 
 
@@ -399,15 +408,11 @@ async def upload_calibration_archive(
     )
 
 
-@router.get(
-    "/api/v1/calibration-versions/{version_id}/samples/{ordinal}/content"
-)
+@router.get("/api/v1/calibration-versions/{version_id}/samples/{ordinal}/content")
 async def calibration_sample_content(
     version_id: str, ordinal: int, request: Request
 ) -> FileResponse:
-    path, metadata = _services(request).catalog_service.calibration_sample_file(
-        version_id, ordinal
-    )
+    path, metadata = _services(request).catalog_service.calibration_sample_file(version_id, ordinal)
     return FileResponse(
         path,
         media_type=metadata["mime_type"],
@@ -419,15 +424,25 @@ async def calibration_sample_content(
 
 
 @router.post("/api/v1/calibration-versions/{version_id}/finalize")
-async def finalize_calibration_version(
-    version_id: str, request: Request
-) -> dict[str, object]:
+async def finalize_calibration_version(version_id: str, request: Request) -> dict[str, object]:
     return _services(request).catalog_service.finalize_calibration_version(version_id)
 
 
 @router.get("/api/v1/runs")
 async def runs(request: Request) -> list[dict[str, object]]:
     return _services(request).repository.list()
+
+
+@router.post("/api/v1/run-comparisons")
+async def compare_runs(payload: RunComparisonRequest, request: Request) -> dict[str, object]:
+    try:
+        return _services(request).run_service.compare_runs(
+            [str(run_id) for run_id in payload.run_ids]
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/api/v1/runs/{run_id}")
@@ -489,15 +504,13 @@ async def _event_stream(
                 yield f"id: {sequence}\nevent: runner\ndata: {encoded}\n\n"
         detail = services.repository.get(run_id)
         if detail is None:
-            yield "event: error\ndata: {\"detail\":\"run not found\"}\n\n"
+            yield 'event: error\ndata: {"detail":"run not found"}\n\n'
             return
         if detail["status"] in TERMINAL_STATUSES:
             terminal_idle_rounds = 0 if emitted else terminal_idle_rounds + 1
             if terminal_idle_rounds >= 2:
                 yield (
-                    "event: terminal\ndata: "
-                    + json.dumps({"status": detail["status"]})
-                    + "\n\n"
+                    "event: terminal\ndata: " + json.dumps({"status": detail["status"]}) + "\n\n"
                 )
                 return
         if await request.is_disconnected():
@@ -536,15 +549,13 @@ async def _log_stream(
                 )
         detail = services.repository.get(run_id)
         if detail is None:
-            yield "event: error\ndata: {\"detail\":\"run not found\"}\n\n"
+            yield 'event: error\ndata: {"detail":"run not found"}\n\n'
             return
         if detail["status"] in TERMINAL_STATUSES:
             terminal_idle_rounds = 0 if emitted else terminal_idle_rounds + 1
             if terminal_idle_rounds >= 2:
                 yield (
-                    "event: terminal\ndata: "
-                    + json.dumps({"status": detail["status"]})
-                    + "\n\n"
+                    "event: terminal\ndata: " + json.dumps({"status": detail["status"]}) + "\n\n"
                 )
                 return
         if await request.is_disconnected():
@@ -570,9 +581,7 @@ async def run_events(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="invalid Last-Event-ID") from exc
     return StreamingResponse(
-        _event_stream(
-            request, run_id=run_id, attempt=attempt, after_sequence=after
-        ),
+        _event_stream(request, run_id=run_id, attempt=attempt, after_sequence=after),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-store",
@@ -610,9 +619,7 @@ async def stream_run_log(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="invalid Last-Event-ID") from exc
     return StreamingResponse(
-        _log_stream(
-            request, run_id=run_id, attempt=attempt, after_sequence=after
-        ),
+        _log_stream(request, run_id=run_id, attempt=attempt, after_sequence=after),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no"},
     )
@@ -675,13 +682,9 @@ async def submit_probe(
 
 
 @router.post("/api/v1/conversion-previews")
-async def preview_conversion(
-    payload: ConversionRunRequest, request: Request
-) -> dict[str, object]:
+async def preview_conversion(payload: ConversionRunRequest, request: Request) -> dict[str, object]:
     try:
-        return _services(request).run_service.preview_conversion(
-            **_conversion_kwargs(payload)
-        )
+        return _services(request).run_service.preview_conversion(**_conversion_kwargs(payload))
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -693,9 +696,7 @@ async def submit_conversion(
 ) -> dict[str, object]:
     services = _services(request)
     try:
-        submission = services.run_service.submit_conversion(
-            **_conversion_kwargs(payload)
-        )
+        submission = services.run_service.submit_conversion(**_conversion_kwargs(payload))
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     services.orchestrator.enqueue(submission.run_id, submission.attempt)

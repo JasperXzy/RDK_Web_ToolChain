@@ -12,6 +12,7 @@ from rdkwt_controller.settings import Settings
 
 import docker
 from docker.models.containers import Container
+from docker.types import DeviceRequest
 
 MANAGED_LABEL = "io.drobotics.rdkwt.managed"
 RUN_ID_LABEL = "io.drobotics.rdkwt.run_id"
@@ -53,23 +54,51 @@ class DockerGateway:
         return self._client
 
     def _validate_deployment_boundary(self) -> None:
-        for name in (self._settings.assets_volume, self._settings.runs_volume):
+        for name in (
+            self._settings.assets_volume,
+            self._settings.runs_volume,
+            self._settings.cache_volume,
+        ):
             if not VOLUME_NAME.fullmatch(name):
                 raise ValueError(f"invalid configured Docker volume name: {name!r}")
-        if self._settings.assets_volume == self._settings.runs_volume:
-            raise ValueError("assets and runs must use different Docker volumes")
+        if (
+            len(
+                {
+                    self._settings.assets_volume,
+                    self._settings.runs_volume,
+                    self._settings.cache_volume,
+                }
+            )
+            != 3
+        ):
+            raise ValueError("assets, runs, and cache must use different Docker volumes")
 
     def ping(self) -> bool:
         return bool(self._docker().ping())
 
     def resolve_cpu_image(self) -> ResolvedRunnerImage:
-        image = self._docker().images.get(self._settings.cpu_runner_image)
+        return self.resolve_runner_image("cpu")
+
+    def resolve_runner_image(self, runner_mode: str) -> ResolvedRunnerImage:
+        if runner_mode == "cpu":
+            reference = self._settings.cpu_runner_image
+        elif runner_mode == "gpu":
+            if not self._settings.gpu_enabled:
+                raise ManagedContainerError(
+                    "GPU Runner is disabled; CPU conversions remain available"
+                )
+            if not self._settings.gpu_runner_image:
+                raise ManagedContainerError("GPU Runner image is not configured")
+            reference = self._settings.gpu_runner_image
+        else:
+            raise ValueError("runner_mode must be cpu or gpu")
+        image = self._docker().images.get(reference)
         immutable_id = str(image.id)
         if not immutable_id.startswith("sha256:"):
             raise ManagedContainerError("Docker did not return an immutable image ID")
         return ResolvedRunnerImage(
-            logical_id="openexplorer-3.7.0-cpu",
-            configured_reference=self._settings.cpu_runner_image,
+            logical_id=f"openexplorer-3.7.0-{runner_mode}",
+            configured_reference=reference,
             immutable_id=immutable_id,
             repo_digests=tuple(image.attrs.get("RepoDigests") or ()),
         )
@@ -98,7 +127,60 @@ class DockerGateway:
                 "repo_digests": image.repo_digests,
                 "contract_version": image.contract_version,
             },
+            "gpu": self.gpu_capability(info=info),
         }
+
+    def gpu_capability(self, *, info: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not self._settings.gpu_enabled:
+            return {
+                "enabled": False,
+                "available": False,
+                "status": "DISABLED",
+                "message": (
+                    "GPU Runner is disabled by local settings; CPU conversion is unaffected"
+                ),
+                "image": None,
+                "device_ids": [],
+            }
+        try:
+            docker_info = self._docker().info() if info is None else info
+            runtimes = docker_info.get("Runtimes") or {}
+            runtime_names = sorted(str(name) for name in runtimes)
+            if "nvidia" not in runtimes:
+                return {
+                    "enabled": True,
+                    "available": False,
+                    "status": "UNAVAILABLE",
+                    "message": "NVIDIA Container Runtime is not registered with Docker",
+                    "runtimes": runtime_names,
+                    "image": self._settings.gpu_runner_image,
+                    "device_ids": list(self._settings.gpu_device_ids),
+                }
+            image = self.resolve_runner_image("gpu")
+            return {
+                "enabled": True,
+                "available": True,
+                "status": "READY",
+                "message": (
+                    "GPU runtime and fixed Runner image are available; toolchain/GPU "
+                    "compatibility is verified again by the task"
+                ),
+                "runtimes": runtime_names,
+                "image": {
+                    "reference": image.configured_reference,
+                    "immutable_id": image.immutable_id,
+                },
+                "device_ids": list(self._settings.gpu_device_ids),
+            }
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "available": False,
+                "status": "UNAVAILABLE",
+                "message": str(exc),
+                "image": self._settings.gpu_runner_image,
+                "device_ids": list(self._settings.gpu_device_ids),
+            }
 
     def container_create_kwargs(
         self,
@@ -106,6 +188,7 @@ class DockerGateway:
         run_id: str,
         attempt: int,
         image: ResolvedRunnerImage,
+        runner_mode: str = "cpu",
     ) -> dict[str, Any]:
         parsed_run_id = str(uuid.UUID(run_id))
         if attempt < 1:
@@ -118,7 +201,9 @@ class DockerGateway:
             ATTEMPT_LABEL: str(attempt),
             CONTRACT_LABEL: image.contract_version,
         }
-        return {
+        if runner_mode not in {"cpu", "gpu"}:
+            raise ValueError("runner_mode must be cpu or gpu")
+        options: dict[str, Any] = {
             "image": image.immutable_id,
             "name": f"rdkwt-run-{parsed_run_id.replace('-', '')[:12]}-a{attempt}",
             "command": ["--request", request_path],
@@ -138,13 +223,32 @@ class DockerGateway:
             "volumes": {
                 self._settings.assets_volume: {"bind": "/assets", "mode": "ro"},
                 self._settings.runs_volume: {"bind": "/runs", "mode": "rw"},
+                self._settings.cache_volume: {"bind": "/cache", "mode": "rw"},
             },
             "labels": labels,
         }
+        if runner_mode == "gpu":
+            device_ids = list(self._settings.gpu_device_ids)
+            device_options: dict[str, Any] = {
+                "driver": "nvidia",
+                "capabilities": [["gpu"]],
+            }
+            if device_ids:
+                device_options["device_ids"] = device_ids
+            else:
+                device_options["count"] = -1
+            options["device_requests"] = [DeviceRequest(**device_options)]
+            options["shm_size"] = self._settings.gpu_shm_size
+        return options
 
-    def create_attempt(self, *, run_id: str, attempt: int) -> Container:
-        image = self.resolve_cpu_image()
-        options = self.container_create_kwargs(run_id=run_id, attempt=attempt, image=image)
+    def create_attempt(self, *, run_id: str, attempt: int, runner_mode: str = "cpu") -> Container:
+        image = self.resolve_runner_image(runner_mode)
+        options = self.container_create_kwargs(
+            run_id=run_id,
+            attempt=attempt,
+            image=image,
+            runner_mode=runner_mode,
+        )
         return self._docker().containers.create(**options)
 
     def create_frozen_attempt(
@@ -154,6 +258,7 @@ class DockerGateway:
         attempt: int,
         image_reference: str | None,
         image_id: str | None,
+        runner_mode: str = "cpu",
     ) -> Container:
         if image_reference is None or image_id is None:
             raise ManagedContainerError("run does not contain a frozen Runner image")
@@ -163,12 +268,19 @@ class DockerGateway:
         if str(image_object.id) != image_id:
             raise ManagedContainerError("resolved Runner image does not match the frozen ID")
         image = ResolvedRunnerImage(
-            logical_id="openexplorer-3.7.0-cpu",
+            logical_id=f"openexplorer-3.7.0-{runner_mode}",
             configured_reference=image_reference,
             immutable_id=image_id,
             repo_digests=tuple(image_object.attrs.get("RepoDigests") or ()),
         )
-        options = self.container_create_kwargs(run_id=run_id, attempt=attempt, image=image)
+        if runner_mode == "gpu" and not self.gpu_capability().get("available"):
+            raise ManagedContainerError("GPU capability is unavailable on this host")
+        options = self.container_create_kwargs(
+            run_id=run_id,
+            attempt=attempt,
+            image=image,
+            runner_mode=runner_mode,
+        )
         return self._docker().containers.create(**options)
 
     def recover_attempt(self, container_id: str, *, run_id: str, attempt: int) -> Container:

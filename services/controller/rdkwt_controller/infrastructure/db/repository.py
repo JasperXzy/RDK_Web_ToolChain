@@ -35,6 +35,7 @@ class ExecutionRecord:
     runner_image_reference: str | None
     runner_image_id: str | None
     container_id: str | None
+    runner_mode: str = "cpu"
 
 
 class RunRepository:
@@ -122,10 +123,7 @@ class RunRepository:
     def is_cancel_requested(self, run_id: str, attempt: int) -> bool:
         with self._session_factory() as session:
             run, row = self._load_pair(session, run_id, attempt)
-            return (
-                run.status in {"CANCELLING", "CANCELLED"}
-                or row.cancel_requested_at is not None
-            )
+            return run.status in {"CANCELLING", "CANCELLED"} or row.cancel_requested_at is not None
 
     def finish(
         self,
@@ -145,6 +143,12 @@ class RunRepository:
             run.status = status
             run.error_code = error_code
             run.error_message = error_message
+            if isinstance(result_payload, dict):
+                compile_metrics = (result_payload.get("metrics") or {}).get("compile")
+                if isinstance(compile_metrics, dict):
+                    cache_metrics = compile_metrics.get("cache")
+                    if isinstance(cache_metrics, dict):
+                        run.cache_hit = bool(cache_metrics.get("hit"))
             row.status = status
             row.stage = status
             row.exit_code = exit_code
@@ -270,9 +274,7 @@ class RunRepository:
             return self._serialize(row, detail=True, queue_position=queue_position)
 
     @staticmethod
-    def _load_pair(
-        session: Session, run_id: str, attempt: int
-    ) -> tuple[ConversionRun, Attempt]:
+    def _load_pair(session: Session, run_id: str, attempt: int) -> tuple[ConversionRun, Attempt]:
         run = session.get(ConversionRun, run_id)
         row = session.scalar(
             select(Attempt).where(Attempt.run_id == run_id, Attempt.number == attempt)
@@ -288,6 +290,7 @@ class RunRepository:
             attempt=attempt.number,
             kind=run.kind,
             status=run.status,
+            runner_mode=run.runner_mode,
             model_version_id=run.model_version_id,
             request_snapshot=run.request_snapshot,
             runner_image_reference=run.runner_image_reference,
@@ -305,9 +308,7 @@ class RunRepository:
             "exit_code": attempt.exit_code,
             "recovered": attempt.recovered,
             "created_at": attempt.created_at.isoformat(),
-            "started_at": (
-                None if attempt.started_at is None else attempt.started_at.isoformat()
-            ),
+            "started_at": (None if attempt.started_at is None else attempt.started_at.isoformat()),
             "finished_at": (
                 None if attempt.finished_at is None else attempt.finished_at.isoformat()
             ),
@@ -338,6 +339,11 @@ class RunRepository:
             "profile_id": row.profile_id,
             "profile_sha256": row.profile_sha256,
             "status": row.status,
+            "runner_mode": row.runner_mode,
+            "cache": {
+                "key": row.cache_key,
+                "hit": row.cache_hit,
+            },
             "queue_position": queue_position,
             "runner_image": {
                 "reference": row.runner_image_reference,

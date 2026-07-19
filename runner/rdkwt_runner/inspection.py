@@ -16,9 +16,7 @@ def inspect_onnx(model_path: Path) -> dict[str, Any]:
     except Exception as exc:
         raise ValueError(f"failed to parse ONNX model: {exc}") from exc
 
-    external_tensors = [
-        item.name for item in model.graph.initializer if uses_external_data(item)
-    ]
+    external_tensors = [item.name for item in model.graph.initializer if uses_external_data(item)]
     checker_error = None
     if not external_tensors:
         try:
@@ -48,11 +46,7 @@ def inspect_onnx(model_path: Path) -> dict[str, Any]:
             "dynamic": dynamic,
         }
 
-    inputs = [
-        tensor_info(item)
-        for item in model.graph.input
-        if item.name not in initializer_names
-    ]
+    inputs = [tensor_info(item) for item in model.graph.input if item.name not in initializer_names]
     outputs = [tensor_info(item) for item in model.graph.output]
     opsets = [
         {"domain": item.domain or "ai.onnx", "version": int(item.version)}
@@ -61,16 +55,14 @@ def inspect_onnx(model_path: Path) -> dict[str, Any]:
     blockers: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
     if checker_error is not None:
-        blockers.append(
-            {"code": "MODEL_CHECKER_FAILED", "message": checker_error[:2000]}
-        )
+        blockers.append({"code": "MODEL_CHECKER_FAILED", "message": checker_error[:2000]})
     if external_tensors:
         blockers.append(
             {
                 "code": "MODEL_EXTERNAL_DATA_UNSUPPORTED",
                 "message": (
                     f"ONNX references {len(external_tensors)} external tensor files; "
-                    "M2 accepts self-contained models only"
+                    "M3 accepts self-contained models only"
                 ),
             }
         )
@@ -81,9 +73,7 @@ def inspect_onnx(model_path: Path) -> dict[str, Any]:
                 "message": f"IR version {int(model.ir_version)} exceeds the supported maximum 9",
             }
         )
-    default_opset = next(
-        (item["version"] for item in opsets if item["domain"] == "ai.onnx"), None
-    )
+    default_opset = next((item["version"] for item in opsets if item["domain"] == "ai.onnx"), None)
     if default_opset is None or not 8 <= default_opset <= 19:
         blockers.append(
             {
@@ -91,27 +81,35 @@ def inspect_onnx(model_path: Path) -> dict[str, Any]:
                 "message": f"ai.onnx opset must be between 8 and 19; found {default_opset}",
             }
         )
-    if len(inputs) != 1:
+    if not 1 <= len(inputs) <= 4:
         blockers.append(
             {
                 "code": "MODEL_INPUT_COUNT_UNSUPPORTED",
-                "message": f"M2 supports one model input; found {len(inputs)}",
+                "message": f"M3 supports one to four model inputs; found {len(inputs)}",
             }
         )
-    elif len(inputs[0]["shape"]) != 4:
-        blockers.append(
-            {
-                "code": "MODEL_INPUT_RANK_UNSUPPORTED",
-                "message": "M2 image conversion requires a four-dimensional input",
-            }
-        )
-    elif inputs[0]["dynamic"]:
-        warnings.append(
-            {
-                "code": "MODEL_DYNAMIC_SHAPE",
-                "message": "Dynamic dimensions require explicit positive target values",
-            }
-        )
+    else:
+        for item in inputs:
+            if not 1 <= len(item["shape"]) <= 4:
+                blockers.append(
+                    {
+                        "code": "MODEL_INPUT_RANK_UNSUPPORTED",
+                        "message": (
+                            f"input {item['name']} has rank {len(item['shape'])}; "
+                            "M3 supports rank one to four"
+                        ),
+                    }
+                )
+            elif item["dynamic"]:
+                warnings.append(
+                    {
+                        "code": "MODEL_DYNAMIC_SHAPE",
+                        "message": (
+                            f"input {item['name']} has dynamic dimensions and requires "
+                            "explicit positive target values"
+                        ),
+                    }
+                )
 
     return {
         "schema_version": "1",

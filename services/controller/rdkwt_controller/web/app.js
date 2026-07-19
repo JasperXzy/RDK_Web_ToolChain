@@ -176,7 +176,7 @@ function calibrationVersion(versionId) {
 }
 
 function calibrationSourceLabel(sourceType) {
-  return sourceType === "npy" ? "直接 NPY" : "图片";
+  return {npy: "直接 NPY", npy_multi: "多输入 NPY ZIP", images: "图片"}[sourceType] || sourceType;
 }
 
 function renderCurrentProject() {
@@ -252,7 +252,10 @@ function renderCalibrations() {
     const warningCount = version.validation_report?.warnings?.length || 0;
     const sourceLabel = calibrationSourceLabel(version.source_type);
     const tensorMetadata = version.source_type === "npy" && version.validation_report?.shape
-      ? ` · [${version.validation_report.shape.join(", ")}] ${version.validation_report.dtype}` : "";
+      ? ` · [${version.validation_report.shape.join(", ")}] ${version.validation_report.dtype}`
+      : version.source_type === "npy_multi" && version.validation_report?.inputs
+        ? ` · ${version.validation_report.inputs.length} inputs`
+        : "";
     copy.append(
       el("strong", "", calibrationSet.name),
       el("small", "", `${sourceLabel} · ${version.sample_count} 份${tensorMetadata} · ${version.status === "READY" ? "清单已冻结" : "可继续上传"}${warningCount ? ` · ${warningCount} 警告` : ""}`),
@@ -273,11 +276,22 @@ function syncCalibrationUploadMode() {
   const selected = calibrationVersion($("#calibration-version-select").value);
   const sourceType = selected?.source_type || "images";
   const npy = sourceType === "npy";
-  $("#sample-files").accept = npy ? ".npy" : ".jpg,.jpeg,.png,.bmp";
-  $("#sample-drop-title").textContent = npy ? "选择直接 NPY 文件" : "选择 JPEG / PNG / BMP";
-  $("#sample-file-label").textContent = selected
-    ? `可一次选择多份${npy ? " NPY" : "图片"}，按选择顺序登记`
-    : "请先选择一个 DRAFT 校准版本";
+  const multi = sourceType === "npy_multi";
+  const sampleInput = $("#sample-files");
+  const uploadButton = $("#sample-upload-form button[type=submit]");
+  sampleInput.accept = npy ? ".npy" : ".jpg,.jpeg,.png,.bmp";
+  sampleInput.disabled = multi;
+  sampleInput.required = !multi;
+  uploadButton.disabled = multi;
+  $("#sample-archive").accept = ".zip";
+  $("#sample-drop-title").textContent = multi
+    ? "请使用 ZIP 导入多输入 NPY"
+    : npy ? "选择直接 NPY 文件" : "选择 JPEG / PNG / BMP";
+  $("#sample-file-label").textContent = !selected
+    ? "请先选择一个 DRAFT 校准版本"
+    : multi
+      ? "ZIP 必须严格使用 <input_name>/<sample>.npy，且各输入样本名完全对齐"
+      : `可一次选择多份${npy ? " NPY" : "图片"}，按选择顺序登记`;
 }
 
 async function loadRuns() {
@@ -285,6 +299,7 @@ async function loadRuns() {
   renderRunSummary();
   renderProjectRuns();
   renderAllRuns();
+  populateComparisonRuns();
   const queued = state.runs.filter((run) => run.status === "QUEUED").length;
   const active = state.runs.filter((run) => ACTIVE_STATUSES.has(run.status) && run.status !== "QUEUED").length;
   $("#queue-status").textContent = `队列 ${queued} · 运行 ${active}`;
@@ -340,6 +355,68 @@ function renderAllRuns() {
   runs.forEach((run) => list.append(createRunRow(run)));
 }
 
+function populateComparisonRuns() {
+  const select = $("#comparison-runs");
+  if (!select) return;
+  const selected = new Set([...select.selectedOptions].map((option) => option.value));
+  select.replaceChildren();
+  state.runs
+    .filter((run) => run.kind === "CONVERSION" && run.status === "SUCCEEDED")
+    .forEach((run) => {
+      const project = state.projects.find((item) => item.id === run.project_id);
+      const option = new Option(
+        `${run.profile_id} · 模型 ${run.model_version_id.slice(0, 8)} · ${run.runner_mode || "cpu"} · ${run.id.slice(0, 8)} · ${project?.name || "未知项目"}`,
+        run.id,
+      );
+      option.selected = selected.has(run.id);
+      select.add(option);
+    });
+  updateComparisonButton();
+}
+
+function updateComparisonButton() {
+  const count = $("#comparison-runs")?.selectedOptions.length || 0;
+  $("#compare-runs").disabled = count < 2 || count > 4;
+}
+
+function comparisonValue(field, value) {
+  if (value === null || value === undefined) return "—";
+  if (["hbm_size_bytes", "ddr_bytes_per_run", "l2m_bytes_per_run"].includes(field)) return formatBytes(value);
+  if (["total_duration_ms", "hbruntime_duration_ms"].includes(field)) return formatDuration(value);
+  if (field === "cache_hit") return value ? "命中" : "未命中";
+  return String(value);
+}
+
+function renderComparison(comparison) {
+  const labels = {
+    profile_id: "目标平台", runner_mode: "Runner", calibration_version_id: "校准版本",
+    calibration_source_type: "校准源", calibration_algorithm: "校准算法", sample_limit: "样本数",
+    compile_mode: "编译模式", core_num: "Core", optimize_level: "优化级别", max_l2m_size: "L2M",
+    hbm_size_bytes: "HBM 大小", fps: "静态 FPS", latency_us: "静态延迟 (μs)",
+    ddr_bytes_per_run: "DDR / run", l2m_bytes_per_run: "L2M / run",
+    minimum_quantized_cosine: "最低量化 Cosine", minimum_verifier_cosine: "最低验证 Cosine",
+    hbruntime_duration_ms: "HBRuntime 耗时", total_duration_ms: "总阶段耗时", cache_hit: "缓存",
+  };
+  const root = $("#comparison-result");
+  root.replaceChildren();
+  $("#comparison-subtitle").textContent = `模型 ${comparison.model_version_id} · ${comparison.rows.length} 个成功任务`;
+  const table = el("table", "comparison-table");
+  const head = el("thead");
+  const headRow = el("tr");
+  headRow.append(el("th", "", "指标"));
+  comparison.rows.forEach((row) => headRow.append(el("th", "", `${row.profile_id} · ${row.run_id.slice(0, 8)}`)));
+  head.append(headRow);
+  const body = el("tbody");
+  Object.keys(labels).forEach((field) => {
+    const row = el("tr", Object.hasOwn(comparison.differences, field) ? "different" : "");
+    row.append(el("th", "", labels[field]));
+    comparison.rows.forEach((item) => row.append(el("td", "", comparisonValue(field, item[field]))));
+    body.append(row);
+  });
+  table.append(head, body);
+  root.append(table, el("p", "comparison-note", "高亮行表示任务间存在差异；数值验证指标用于回归判断，不代表最终业务数据集精度。"));
+}
+
 function showView(view) {
   state.currentView = view;
   $("#workspace-view").classList.toggle("hidden", view !== "workspace");
@@ -363,12 +440,14 @@ function renderPreflight() {
     checks.append(row);
   });
   renderPreflightDialog();
+  syncRunnerMode();
 }
 
 function checkLabel(id) {
   return {
     "docker-engine": "Docker Engine", "runner-image": "Runner 镜像",
     "storage-state": "状态存储", "storage-assets": "资产存储", "storage-runs": "任务存储",
+    "storage-cache": "编译缓存", "gpu-runner": "GPU Runner（可选）",
   }[id] || id;
 }
 
@@ -452,8 +531,10 @@ function populateWizardCalibrations() {
   if (!select) return;
   const selected = select.value;
   select.replaceChildren(new Option("选择已定稿版本", ""));
+  const inputCount = selectedModelVersion()?.inspection?.inputs?.length || 0;
   for (const {calibrationSet, version} of projectCalibrations()) {
-    if (version.status === "READY" && version.sample_count >= 20) {
+    const sourceMatches = inputCount > 1 ? version.source_type === "npy_multi" : version.source_type !== "npy_multi";
+    if (sourceMatches && version.status === "READY" && version.sample_count >= 20) {
       select.add(new Option(`${calibrationSet.name} · ${calibrationSourceLabel(version.source_type)} · ${version.sample_count} 份`, version.id));
     }
   }
@@ -498,14 +579,28 @@ function selectProfile(profileId, resetInvalid = false) {
   Object.entries(values).forEach(([name, value]) => {
     const item = el("div", "lock-item"); item.append(el("span", "", name), el("strong", "", value)); locks.append(item);
   });
+  syncRunnerMode();
   saveWizardDraft();
+}
+
+function syncRunnerMode() {
+  const select = $("#runner-mode");
+  if (!select) return;
+  const gpu = state.preflight?.details?.gpu || {};
+  const gpuOption = select.querySelector('option[value="gpu"]');
+  gpuOption.disabled = !gpu.available;
+  if (!gpu.available && select.value === "gpu") select.value = "cpu";
+  $("#runner-mode-note").textContent = gpu.available
+    ? `GPU Runner 已就绪：${gpu.image?.immutable_id || gpu.image?.reference || "固定镜像"}`
+    : `当前仅使用 CPU。${gpu.message || "GPU Runner 未启用，不影响转换。"}`;
 }
 
 const WIZARD_FIELDS = [
   "wizard-model", "wizard-profile", "input-name", "target-shape", "train-layout", "train-type", "runtime-type",
   "input-mean", "input-scale", "input-std", "wizard-calibration", "sample-limit", "calibration-algorithm",
   "recipe-id", "resize-short", "recipe-mean", "recipe-std", "output-prefix", "compile-mode", "balance-factor",
-  "core-num", "l2m-mode", "l2m-custom", "optimize-level", "jobs",
+  "core-num", "l2m-mode", "l2m-custom", "optimize-level", "jobs", "runner-mode", "cache-mode",
+  "verification-mode", "compare-digits",
 ];
 
 function draftKey() {
@@ -516,8 +611,18 @@ function saveWizardDraft() {
   if (!state.currentProject) return;
   const fields = {};
   WIZARD_FIELDS.forEach((id) => { fields[id] = $(`#${id}`).value; });
+  const additionalInputs = [...$$("#additional-input-configs .input-config-card")].map((card) => ({
+    name: card.querySelector(".multi-input-name").value,
+    target_shape: card.querySelector(".multi-target-shape").value,
+    train_layout: card.querySelector(".multi-train-layout").value,
+    train_type: card.querySelector(".multi-train-type").value,
+    runtime_type: card.querySelector(".multi-runtime-type").value,
+    mean: card.querySelector(".multi-input-mean").value,
+    scale: card.querySelector(".multi-input-scale").value,
+    std: card.querySelector(".multi-input-std").value,
+  }));
   try {
-    localStorage.setItem(draftKey(), JSON.stringify({version: 1, saved_at: new Date().toISOString(), fields}));
+    localStorage.setItem(draftKey(), JSON.stringify({version: 2, saved_at: new Date().toISOString(), fields, additional_inputs: additionalInputs}));
     $("#wizard-draft-status").textContent = `草稿已保存 · ${new Date().toLocaleTimeString("zh-CN", {hour: "2-digit", minute: "2-digit"})}`;
   } catch (_error) {
     $("#wizard-draft-status").textContent = "浏览器未允许保存草稿";
@@ -527,7 +632,7 @@ function saveWizardDraft() {
 function loadWizardDraft() {
   let draft = null;
   try { draft = JSON.parse(localStorage.getItem(draftKey())); } catch (_error) { draft = null; }
-  if (draft?.version === 1) {
+  if ([1, 2].includes(draft?.version)) {
     WIZARD_FIELDS.forEach((id) => {
       if (draft.fields[id] !== undefined) $(`#${id}`).value = draft.fields[id];
     });
@@ -535,18 +640,29 @@ function loadWizardDraft() {
   }
   const readyModel = projectModels().find(({version}) => version.compatibility_status === "READY");
   if (!$("#wizard-model").value && readyModel) $("#wizard-model").value = readyModel.version.id;
-  const readyCalibration = projectCalibrations().find(({version}) => version.status === "READY" && version.sample_count >= 20);
-  if (!$("#wizard-calibration").value && readyCalibration) $("#wizard-calibration").value = readyCalibration.version.id;
   const profileId = state.profiles.some((profile) => profile.profile_id === $("#wizard-profile").value)
     ? $("#wizard-profile").value : state.profiles[0]?.profile_id;
   selectProfile(profileId, false);
-  const canKeepDraftInput = draft?.version === 1
+  const canKeepDraftInput = [1, 2].includes(draft?.version)
     && draft.fields["wizard-model"] === $("#wizard-model").value
     && Boolean($("#input-name").value && $("#target-shape").value);
-  updateWizardModel(!canKeepDraftInput);
+  updateWizardModel(!canKeepDraftInput, canKeepDraftInput ? draft.additional_inputs : null);
+  populateWizardCalibrations();
+  const readyCalibration = projectCalibrations().find(({version}) => {
+    const inputs = selectedModelVersion()?.inspection?.inputs?.length || 0;
+    return version.status === "READY" && version.sample_count >= 20
+      && (inputs > 1 ? version.source_type === "npy_multi" : version.source_type !== "npy_multi");
+  });
+  const draftCalibration = draft?.fields?.["wizard-calibration"];
+  if (draftCalibration && [...$("#wizard-calibration").options].some((option) => option.value === draftCalibration)) {
+    $("#wizard-calibration").value = draftCalibration;
+  } else if (!$("#wizard-calibration").value && readyCalibration) {
+    $("#wizard-calibration").value = readyCalibration.version.id;
+  }
   updateCalibrationSelection(false);
   toggleCompileMode();
   toggleL2mCustom();
+  syncRunnerMode();
 }
 
 function openWizard() {
@@ -577,13 +693,82 @@ function selectedModelVersion() {
   return projectModels().find(({version}) => version.id === $("#wizard-model").value)?.version || null;
 }
 
-function updateWizardModel(overwrite = true) {
+const TRAIN_TYPE_OPTIONS = [
+  ["rgb", "RGB"], ["bgr", "BGR"], ["gray", "Gray"], ["yuv444", "YUV444"], ["featuremap", "Featuremap"],
+];
+const RUNTIME_TYPE_OPTIONS = [
+  ["nv12", "NV12"], ["rgb", "RGB"], ["bgr", "BGR"], ["yuv444", "YUV444"], ["gray", "Gray"], ["featuremap", "Featuremap"],
+];
+
+function inputDefaults(input) {
+  const shape = input.shape || [];
+  const rankFour = shape.length === 4;
+  const channels = rankFour && Number.isInteger(shape[1]) ? shape[1] : null;
+  const trainType = channels === 3 ? "rgb" : channels === 1 ? "gray" : "featuremap";
+  const evenImage = rankFour && Number.isInteger(shape[2]) && Number.isInteger(shape[3])
+    && shape[2] % 2 === 0 && shape[3] % 2 === 0;
+  return {
+    name: input.name,
+    target_shape: shape.map((item) => Number.isInteger(item) && item > 0 ? item : "").join(","),
+    train_layout: "NCHW",
+    train_type: trainType,
+    runtime_type: trainType === "rgb" && evenImage ? "nv12" : trainType === "gray" ? "gray" : "featuremap",
+    mean: "", scale: "", std: "",
+  };
+}
+
+function selectControl(className, options, value) {
+  const select = el("select", className);
+  options.forEach(([optionValue, label]) => select.add(new Option(label, optionValue)));
+  select.value = value;
+  return select;
+}
+
+function labeledControl(label, control) {
+  const wrapper = el("label", "", label);
+  wrapper.append(control);
+  return wrapper;
+}
+
+function renderAdditionalInputs(inputs, draftInputs = null) {
+  const root = $("#additional-input-configs");
+  root.replaceChildren();
+  inputs.slice(1).forEach((input, offset) => {
+    const index = offset + 1;
+    const saved = draftInputs?.[offset];
+    const defaults = inputDefaults(input);
+    const values = saved?.name === input.name ? {...defaults, ...saved} : defaults;
+    const card = el("div", "input-config-card");
+    card.dataset.inputIndex = String(index);
+    card.append(el("h4", "", `Input ${index + 1} · ${input.name}`));
+    const grid = el("div", "form-grid three");
+    const name = el("input", "multi-input-name"); name.readOnly = true; name.value = input.name;
+    const shape = el("input", "multi-target-shape"); shape.required = true; shape.placeholder = "1,16"; shape.value = values.target_shape;
+    const mean = el("input", "multi-input-mean"); mean.placeholder = "可选"; mean.value = values.mean || "";
+    const scale = el("input", "multi-input-scale"); scale.placeholder = "可选"; scale.value = values.scale || "";
+    const std = el("input", "multi-input-std"); std.placeholder = "可选"; std.value = values.std || "";
+    grid.append(
+      labeledControl("输入节点", name),
+      labeledControl("目标 Shape", shape),
+      labeledControl("训练布局", selectControl("multi-train-layout", [["NCHW", "NCHW"], ["NHWC", "NHWC"]], values.train_layout)),
+      labeledControl("训练输入", selectControl("multi-train-type", TRAIN_TYPE_OPTIONS, values.train_type)),
+      labeledControl("Runtime 输入", selectControl("multi-runtime-type", RUNTIME_TYPE_OPTIONS, values.runtime_type)),
+      labeledControl("Mean", mean), labeledControl("Scale", scale), labeledControl("Std（可选）", std),
+    );
+    card.append(grid);
+    root.append(card);
+  });
+}
+
+function updateWizardModel(overwrite = true, draftInputs = null) {
   const version = selectedModelVersion();
   const root = $("#wizard-model-info");
   root.replaceChildren();
   if (!version?.inspection) {
     root.className = "inspection-card empty-state";
     root.textContent = version ? "该模型尚未完成检查" : "请选择模型";
+    $("#additional-input-configs").replaceChildren();
+    populateWizardCalibrations();
     return;
   }
   root.className = "inspection-card";
@@ -606,9 +791,18 @@ function updateWizardModel(overwrite = true) {
   root.append(io);
   const input = inspection.inputs?.[0];
   if (input && overwrite) {
-    $("#input-name").value = input.name;
-    $("#target-shape").value = input.shape.map((item) => Number.isInteger(item) ? item : "").join(",");
+    const defaults = inputDefaults(input);
+    $("#input-name").value = defaults.name;
+    $("#target-shape").value = defaults.target_shape;
+    $("#train-layout").value = defaults.train_layout;
+    $("#train-type").value = defaults.train_type;
+    $("#runtime-type").value = defaults.runtime_type;
+    $("#input-mean").value = defaults.mean;
+    $("#input-scale").value = defaults.scale;
+    $("#input-std").value = defaults.std;
   }
+  renderAdditionalInputs(inspection.inputs || [], draftInputs);
+  populateWizardCalibrations();
   saveWizardDraft();
 }
 
@@ -619,45 +813,122 @@ function parseNumbers(value, name, allowEmpty = true) {
   return values;
 }
 
-function parseShape() {
-  const values = $("#target-shape").value.split(",").map((item) => Number(item.trim()));
-  if (values.length !== 4 || values.some((item) => !Number.isInteger(item) || item < 1)) throw new Error("目标 Shape 必须包含 4 个正整数");
+function parseShape(control = $("#target-shape"), name = "目标 Shape") {
+  const values = control.value.split(",").map((item) => Number(item.trim()));
+  if (values.length < 1 || values.length > 4 || values.some((item) => !Number.isInteger(item) || item < 1)) {
+    throw new Error(`${name} 必须包含 1～4 个正整数`);
+  }
   return values;
 }
 
-function inputGeometry() {
-  const shape = parseShape();
-  const nchw = $("#train-layout").value === "NCHW";
+function inputGeometry(input = configuredInputs()[0]) {
+  const shape = input.target_shape;
+  if (shape.length !== 4) throw new Error(`${input.name} 只有 Rank 4 输入可使用图片/NV12 几何配置`);
+  const nchw = input.train_layout === "NCHW";
   return {shape, channels: nchw ? shape[1] : shape[3], height: nchw ? shape[2] : shape[1], width: nchw ? shape[3] : shape[2]};
+}
+
+function inputFromControls(controls, index) {
+  return {
+    name: controls.name.value,
+    target_shape: parseShape(controls.shape, `Input ${index + 1} 目标 Shape`),
+    train_type: controls.trainType.value,
+    train_layout: controls.trainLayout.value,
+    runtime_type: controls.runtimeType.value,
+    normalization: {
+      mean: parseNumbers(controls.mean.value, `Input ${index + 1} Mean`),
+      scale: parseNumbers(controls.scale.value, `Input ${index + 1} Scale`),
+      std: parseNumbers(controls.std.value, `Input ${index + 1} Std`),
+    },
+  };
+}
+
+function configuredInputs() {
+  const first = inputFromControls({
+    name: $("#input-name"), shape: $("#target-shape"), trainType: $("#train-type"),
+    trainLayout: $("#train-layout"), runtimeType: $("#runtime-type"),
+    mean: $("#input-mean"), scale: $("#input-scale"), std: $("#input-std"),
+  }, 0);
+  const rest = [...$$("#additional-input-configs .input-config-card")].map((card, offset) => inputFromControls({
+    name: card.querySelector(".multi-input-name"), shape: card.querySelector(".multi-target-shape"),
+    trainType: card.querySelector(".multi-train-type"), trainLayout: card.querySelector(".multi-train-layout"),
+    runtimeType: card.querySelector(".multi-runtime-type"), mean: card.querySelector(".multi-input-mean"),
+    scale: card.querySelector(".multi-input-scale"), std: card.querySelector(".multi-input-std"),
+  }, offset + 1));
+  return [first, ...rest];
+}
+
+function validateInputConfiguration(input) {
+  const shape = input.target_shape;
+  if (shape[0] !== 1) throw new Error(`${input.name} 当前仅支持 batch=1`);
+  let channels = null; let height = null; let width = null;
+  if (shape.length === 4) {
+    const nchw = input.train_layout === "NCHW";
+    channels = nchw ? shape[1] : shape[3];
+    height = nchw ? shape[2] : shape[1];
+    width = nchw ? shape[3] : shape[2];
+  }
+  if (input.train_type !== "featuremap") {
+    if (shape.length !== 4) throw new Error(`${input.name} 的 ${input.train_type} 输入要求 Rank 4`);
+    const expectedChannels = input.train_type === "gray" ? 1 : 3;
+    if (channels !== expectedChannels) throw new Error(`${input.name} 的 ${input.train_type} 要求 channels=${expectedChannels}`);
+  }
+  if (input.runtime_type === "nv12") {
+    if (shape.length !== 4 || channels !== 3 || height % 2 || width % 2) {
+      throw new Error(`${input.name} 的 NV12 要求 Rank 4、channels=3 且宽高为偶数`);
+    }
+  }
+  Object.entries(input.normalization).forEach(([field, values]) => {
+    const label = {mean: "Mean", scale: "Scale", std: "Std"}[field];
+    const allowed = channels === null ? [0, 1] : [0, 1, channels];
+    if (!allowed.includes(values.length)) throw new Error(`${input.name} ${label} 数量必须为 ${allowed.join("、")}`);
+  });
 }
 
 function validateWizardStep(step) {
   if (step === 1 && selectedModelVersion()?.compatibility_status !== "READY") throw new Error("请选择已通过检查的模型");
-  if (step === 2 && !$("#wizard-profile").value) throw new Error("请选择目标平台");
+  if (step === 2) {
+    if (!$("#wizard-profile").value) throw new Error("请选择目标平台");
+    if ($("#runner-mode").value === "gpu" && $("#runner-mode option[value=gpu]").disabled) {
+      throw new Error("当前主机没有可用的 GPU Runner，请使用 CPU");
+    }
+  }
   if (step === 3) {
-    const {shape, channels, height, width} = inputGeometry();
-    const expectedChannels = $("#train-type").value === "gray" ? 1 : 3;
-    if (shape[0] !== 1 || channels !== expectedChannels) throw new Error(`当前输入类型要求 batch=1、channels=${expectedChannels}`);
-    if ($("#runtime-type").value === "nv12" && (height % 2 || width % 2)) throw new Error("NV12 的目标宽高必须为偶数");
-    [["Mean", $("#input-mean").value], ["Scale", $("#input-scale").value], ["Std", $("#input-std").value]].forEach(([name, value]) => {
-      const numbers = parseNumbers(value, name);
-      if (numbers.length && ![1, channels].includes(numbers.length)) throw new Error(`${name} 数量必须为 1 或 ${channels}`);
-    });
+    const inputs = configuredInputs();
+    const inspected = selectedModelVersion()?.inspection?.inputs || [];
+    if (inputs.length !== inspected.length) throw new Error("输入配置数量必须与 ONNX 模型一致");
+    inputs.forEach(validateInputConfiguration);
   }
   if (step === 4) {
     const selected = calibrationVersion($("#wizard-calibration").value);
     const limit = Number($("#sample-limit").value);
     if (!selected || selected.status !== "READY") throw new Error("请选择已定稿校准版本");
     if (!Number.isInteger(limit) || limit < 20 || limit > selected.sample_count) throw new Error(`使用样本数必须在 20～${selected.sample_count} 之间`);
+    const inputs = configuredInputs();
     if (selected.source_type === "npy") {
-      const expectedShape = parseShape().slice(1);
+      if (inputs.length !== 1) throw new Error("直接 NPY 只支持单输入模型");
+      const expectedShape = inputs[0].target_shape.slice(1);
       const actualShape = selected.validation_report?.shape;
       if (JSON.stringify(actualShape) !== JSON.stringify(expectedShape)) {
         throw new Error(`直接 NPY Shape [${actualShape?.join(", ") || "未知"}] 必须匹配模型去除 batch 后的 [${expectedShape.join(", ")}]`);
       }
       if (!selected.validation_report?.dtype) throw new Error("直接 NPY 校准报告缺少 dtype");
+    } else if (selected.source_type === "npy_multi") {
+      if (inputs.length < 2) throw new Error("多输入 NPY ZIP 至少需要两个模型输入");
+      const reports = new Map((selected.validation_report?.inputs || []).map((item) => [item.name, item]));
+      inputs.forEach((input) => {
+        const report = reports.get(input.name);
+        const expected = input.target_shape.slice(1);
+        if (!report || JSON.stringify(report.shape) !== JSON.stringify(expected) || !report.dtype) {
+          throw new Error(`${input.name} 的 NPY 必须为 batch-free Shape [${expected.join(", ")}] 且包含 dtype 报告`);
+        }
+      });
     } else {
-      const {channels} = inputGeometry();
+      if (inputs.length !== 1) throw new Error("图片校准只支持单输入模型");
+      if (!["rgb", "bgr", "gray"].includes(inputs[0].train_type)) {
+        throw new Error("图片校准的训练输入必须是 RGB、BGR 或 Gray");
+      }
+      const {channels} = inputGeometry(inputs[0]);
       if (parseNumbers($("#recipe-mean").value, "Recipe Mean", false).length !== channels) throw new Error(`Recipe Mean 必须包含 ${channels} 项`);
       const std = parseNumbers($("#recipe-std").value, "Recipe Std", false);
       if (std.length !== channels || std.some((item) => item === 0)) throw new Error(`Recipe Std 必须包含 ${channels} 个非零值`);
@@ -666,6 +937,7 @@ function validateWizardStep(step) {
   if (step === 5) {
     if (!$("#output-prefix").checkValidity()) throw new Error("输出前缀格式不合法");
     if ($("#compile-mode").value === "balance" && !$("#balance-factor").checkValidity()) throw new Error("balance 模式需要 0～100 的 Balance factor");
+    if (!$("#compare-digits").checkValidity()) throw new Error("比较小数位必须在 1～12 之间");
   }
   if (step === 6 && !$("#confirm-snapshot").checked) throw new Error("请确认冻结配置后再提交");
 }
@@ -674,7 +946,7 @@ function conversionPayload() {
   const l2m = $("#l2m-mode").value;
   const selectedCalibration = calibrationVersion($("#wizard-calibration").value);
   const calibration = {algorithm: $("#calibration-algorithm").value};
-  if (selectedCalibration?.source_type !== "npy") {
+  if (selectedCalibration?.source_type === "images") {
     calibration.recipe = {
       id: $("#recipe-id").value,
       resize_short: Number($("#resize-short").value),
@@ -682,24 +954,16 @@ function conversionPayload() {
       std: parseNumbers($("#recipe-std").value, "Recipe Std", false),
     };
   }
-  return {
+  const inputs = configuredInputs();
+  const payload = {
     profile_id: $("#wizard-profile").value,
     model_version_id: $("#wizard-model").value,
     calibration_version_id: $("#wizard-calibration").value,
     output_prefix: $("#output-prefix").value,
-    input: {
-      name: $("#input-name").value,
-      target_shape: parseShape(),
-      train_type: $("#train-type").value,
-      train_layout: $("#train-layout").value,
-      runtime_type: $("#runtime-type").value,
-      normalization: {
-        mean: parseNumbers($("#input-mean").value, "Mean"),
-        scale: parseNumbers($("#input-scale").value, "Scale"),
-        std: parseNumbers($("#input-std").value, "Std"),
-      },
-    },
     calibration,
+    runner_mode: $("#runner-mode").value,
+    cache_mode: $("#cache-mode").value,
+    verification: {mode: $("#verification-mode").value, compare_digits: Number($("#compare-digits").value)},
     core_num: Number($("#core-num").value),
     max_l2m_size: l2m === "auto" ? "auto" : l2m === "custom" ? Number($("#l2m-custom").value) : 0,
     compile_mode: $("#compile-mode").value,
@@ -708,6 +972,9 @@ function conversionPayload() {
     sample_limit: Number($("#sample-limit").value),
     jobs: Number($("#jobs").value),
   };
+  if (inputs.length === 1) payload.input = inputs[0];
+  else payload.inputs = inputs;
+  return payload;
 }
 
 async function fetchYamlPreview() {
@@ -724,12 +991,12 @@ async function fetchYamlPreview() {
 
 function updateCalibrationSelection(save = true) {
   const selected = calibrationVersion($("#wizard-calibration").value);
-  const npy = selected?.source_type === "npy";
+  const direct = ["npy", "npy_multi"].includes(selected?.source_type);
   if (selected) $("#sample-limit").value = Math.min(Math.max(20, Number($("#sample-limit").value) || 20), selected.sample_count);
-  $("#image-recipe-fields").classList.toggle("hidden", npy);
-  $("#calibration-preview").classList.toggle("npy-mode", npy);
-  $("#calibration-step-copy").textContent = npy
-    ? "直接 NPY 不再执行图片 Recipe；提交前会核对冻结的 Shape、dtype、哈希和有限数值统计。"
+  $("#image-recipe-fields").classList.toggle("hidden", direct);
+  $("#calibration-preview").classList.toggle("npy-mode", direct);
+  $("#calibration-step-copy").textContent = direct
+    ? "直接 NPY 不执行图片 Recipe；提交前会逐输入核对冻结的 Shape、dtype、样本对齐、哈希和有限数值统计。"
     : "选择冻结的校准版本，并检查第一份样本的中心裁剪结果和归一化统计。";
   renderCalibrationPreview().catch((error) => {
     $("#preview-stats").replaceChildren(el("span", "", `预览失败：${error.message}`));
@@ -749,28 +1016,30 @@ async function renderCalibrationPreview() {
     statsRoot.replaceChildren(el("span", "", "选择校准版本后生成预览"));
     return;
   }
-  if (selected?.source_type === "npy") {
+  if (["npy", "npy_multi"].includes(selected?.source_type)) {
     image.removeAttribute("src");
     canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
     const report = selected.validation_report || {};
-    const statistics = report.first_sample_statistics || {};
     const formatStatistic = (value) => Number.isFinite(Number(value)) ? Number(value).toPrecision(6) : "—";
-    const stats = {
-      "数据路径": "直接 NPY（无图片 Recipe）",
-      "样本 Shape": `[${(report.shape || []).join(", ")}]`,
-      "dtype": report.dtype || "—",
-      "第一份最小值": formatStatistic(statistics.minimum),
-      "第一份最大值": formatStatistic(statistics.maximum),
-      "第一份均值": formatStatistic(statistics.mean),
-      "第一份标准差": formatStatistic(statistics.standard_deviation),
-    };
     statsRoot.replaceChildren();
-    Object.entries(stats).forEach(([name, value]) => {
-      const line = el("div", "stat-line"); line.append(el("span", "", name), el("code", "", value)); statsRoot.append(line);
+    const reports = selected.source_type === "npy_multi"
+      ? (report.inputs || [])
+      : [{name: "Input 1", shape: report.shape, dtype: report.dtype, first_sample_statistics: report.first_sample_statistics}];
+    statsRoot.append(keyValue("数据路径", selected.source_type === "npy_multi" ? "多输入 NPY ZIP（样本名已对齐）" : "直接 NPY（无图片 Recipe）"));
+    reports.forEach((inputReport) => {
+      const statistics = inputReport.first_sample_statistics || {};
+      const block = el("div", "npy-input-statistics");
+      block.append(
+        el("strong", "", inputReport.name || "Input"),
+        keyValue("Shape / dtype", `[${(inputReport.shape || []).join(", ")}] · ${inputReport.dtype || "—"}`),
+        keyValue("第一份 min / max", `${formatStatistic(statistics.minimum)} / ${formatStatistic(statistics.maximum)}`),
+        keyValue("第一份 mean / std", `${formatStatistic(statistics.mean)} / ${formatStatistic(statistics.standard_deviation)}`),
+      );
+      statsRoot.append(block);
     });
     return;
   }
-  const {channels, height, width, shape} = inputGeometry();
+  const {channels, height, width, shape} = inputGeometry(configuredInputs()[0]);
   const resizeShort = Number($("#resize-short").value);
   const means = parseNumbers($("#recipe-mean").value, "Recipe Mean", false);
   const stds = parseNumbers($("#recipe-std").value, "Recipe Std", false);
@@ -913,6 +1182,9 @@ function renderRunOverview(run, attempt) {
   const summary = run.summary || {};
   const perf = summary.static_performance || {};
   const quant = summary.quantization || {};
+  const verification = summary.verification || {};
+  const verifierMinimum = verification.hb_verifier?.minimum_cosine;
+  const cache = run.cache || summary.cache || {};
   const hbm = summary.hbm;
   const outputCosine = quant.output_cosines?.[0];
   const cards = el("div", "summary-cards");
@@ -921,13 +1193,15 @@ function renderRunOverview(run, attempt) {
     summaryCard("HBM", hbm ? formatBytes(hbm.size_bytes) : "—", hbm?.relative_path || "尚未生成"),
     summaryCard("总阶段耗时", formatDuration(summary.total_duration_ms), `${summary.steps?.length || 0} 个已记录阶段`),
     summaryCard("静态性能", perf.fps !== undefined && perf.fps !== null ? `${perf.fps} FPS` : "—", perf.latency_us !== undefined && perf.latency_us !== null ? `${perf.latency_us} μs` : "无静态报告"),
+    summaryCard("数值验证", verifierMinimum ? String(verifierMinimum.cosine_similarity) : verification.enabled === false ? "已关闭" : "—", verifierMinimum?.tensor_name || "HBRuntime + hb_verifier"),
   );
   root.append(cards);
   const grid = el("div", "detail-grid");
   const execution = el("div", "detail-card"); execution.append(el("h3", "", "执行快照"));
   execution.append(
     keyValue("状态 / 阶段", `${run.status} / ${attempt.stage}`), keyValue("Attempt", `${attempt.number}（${attempt.recovered ? "重启后恢复" : "正常启动"}）`),
-    keyValue("Runner image", run.runner_image?.immutable_id), keyValue("应用 / 合约", `${run.app_version} / ${run.contract_version}`),
+    keyValue("Runner / image", `${run.runner_mode || "cpu"} / ${run.runner_image?.immutable_id || "—"}`), keyValue("应用 / 合约", `${run.app_version} / ${run.contract_version}`),
+    keyValue("编译缓存", cache.key ? `${cache.hit ? "HIT" : "MISS"} / ${cache.key.slice(0, 16)}…` : "关闭"),
     keyValue("容器退出码", attempt.exit_code === null ? "—" : String(attempt.exit_code)), keyValue("Profile SHA", run.profile_sha256),
   );
   const metrics = el("div", "detail-card"); metrics.append(el("h3", "", "质量与资源"));
@@ -936,9 +1210,11 @@ function renderRunOverview(run, attempt) {
     keyValue("最低节点 Cosine", quant.minimum_node ? `${quant.minimum_node.name}: ${quant.minimum_node.quantized_cosine}` : "—"),
     keyValue("最低内存估计", perf.minimum_memory_bytes ? formatBytes(perf.minimum_memory_bytes) : "—"),
     keyValue("DDR / run", perf.ddr_bytes_per_run ? formatBytes(perf.ddr_bytes_per_run) : "—"),
+    keyValue("hb_verifier 最低 Cosine", verifierMinimum ? `${verifierMinimum.tensor_name}: ${verifierMinimum.cosine_similarity}` : "—"),
+    keyValue("HBRuntime 推理耗时", verification.hbruntime ? formatDuration(verification.hbruntime.duration_ms) : "—"),
     keyValue("警告 / 建议产物", `${summary.warning_count || 0} / ${summary.advice_artifact_count || 0}`),
   );
-  metrics.append(el("p", "cosine-note", "Cosine 仅反映量化前后数值相似度，不等同于最终业务精度；完整精度验证属于后续验证流程。"));
+  metrics.append(el("p", "cosine-note", "HBRuntime 与 hb_verifier 是真实数值冒烟和模型阶段回归验证，但仍不等同于完整业务数据集精度。"));
   grid.append(execution, metrics); root.append(grid);
   if (run.kind === "MODEL_INSPECTION" && attempt.result?.metrics?.inspect) {
     const inspection = attempt.result.metrics.inspect;
@@ -1103,6 +1379,8 @@ $("#sample-upload-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const versionId = $("#calibration-version-select").value; const files = [...$("#sample-files").files];
   if (!versionId) return toast("请选择一个 DRAFT 校准版本", true);
+  if (calibrationVersion(versionId)?.source_type === "npy_multi") return toast("多输入 NPY 必须通过 ZIP 原子导入", true);
+  if (!files.length) return toast("请选择至少一份校准样本", true);
   const button = event.submitter; button.disabled = true;
   try {
     for (let index = 0; index < files.length; index += 1) {
@@ -1169,12 +1447,31 @@ $("#run-filter").addEventListener("change", renderAllRuns);
 $("#run-search").addEventListener("input", renderAllRuns);
 $$(".topnav-item").forEach((button) => button.addEventListener("click", () => showView(button.dataset.view)));
 
-$("#wizard-model").addEventListener("change", () => updateWizardModel(true));
+$("#wizard-model").addEventListener("change", () => {
+  updateWizardModel(true);
+  updateCalibrationSelection(true);
+});
 $("#wizard-calibration").addEventListener("change", () => updateCalibrationSelection(true));
+$("#runner-mode").addEventListener("change", syncRunnerMode);
 $("#compile-mode").addEventListener("change", toggleCompileMode);
 $("#l2m-mode").addEventListener("change", toggleL2mCustom);
 ["target-shape", "train-layout", "train-type", "resize-short", "recipe-mean", "recipe-std"].forEach((id) => $(`#${id}`).addEventListener("change", () => renderCalibrationPreview().catch(() => {})));
 WIZARD_FIELDS.forEach((id) => $(`#${id}`).addEventListener("change", () => { state.wizardPreview = null; saveWizardDraft(); }));
+$("#additional-input-configs").addEventListener("change", () => {
+  state.wizardPreview = null;
+  saveWizardDraft();
+});
+$("#comparison-runs").addEventListener("change", updateComparisonButton);
+$("#compare-runs").addEventListener("click", async () => {
+  const runIds = [...$("#comparison-runs").selectedOptions].map((option) => option.value);
+  try {
+    const comparison = await api("/api/v1/run-comparisons", {method: "POST", body: JSON.stringify({run_ids: runIds})});
+    renderComparison(comparison);
+    $("#comparison-dialog").showModal();
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
 $("#wizard-next").addEventListener("click", async () => {
   try {
     validateWizardStep(state.wizardStep);
@@ -1230,7 +1527,7 @@ async function initialize() {
       api("/api/v1/profiles"), api("/api/v1/system/preflight"), api("/api/v1/projects"), api("/api/v1/runs"),
     ]);
     state.profiles = profiles; state.preflight = preflight; state.projects = projects; state.runs = runs;
-    renderProfileCards(); renderPreflight(); renderProjectList(); renderRunSummary(); renderAllRuns();
+    renderProfileCards(); renderPreflight(); renderProjectList(); renderRunSummary(); renderAllRuns(); populateComparisonRuns();
     const queued = runs.filter((run) => run.status === "QUEUED").length;
     const active = runs.filter((run) => ACTIVE_STATUSES.has(run.status) && run.status !== "QUEUED").length;
     $("#queue-status").textContent = `队列 ${queued} · 运行 ${active}`;

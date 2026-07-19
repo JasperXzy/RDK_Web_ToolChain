@@ -77,7 +77,9 @@ def _configuration(profile_id: str, output_prefix: str) -> dict[str, object]:
             "max_time_per_fc": 0,
             "jobs": 4,
             "cache_mode": "disable",
+            "cache_key": None,
         },
+        "verification": {"mode": "basic", "compare_digits": 5},
     }
 
 
@@ -162,7 +164,14 @@ def test_resnet18_real_calibration_compile_golden(
             "attempt": 1,
             "adapter": "openexplorer-3.7.0",
             "runner_mode": "cpu",
-            "pipeline": ["inspect", "check", "preprocess", "compile", "collect"],
+            "pipeline": [
+                "inspect",
+                "check",
+                "preprocess",
+                "compile",
+                "verify",
+                "collect",
+            ],
             "paths": {
                 "model": model_logical_path,
                 "calibration_source": calibration_logical_path,

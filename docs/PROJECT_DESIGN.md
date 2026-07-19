@@ -2040,7 +2040,13 @@ RDK_WebToolChain/
 | `RDKWT_EXPORT_DIR` | 导出目录 |
 | `RDKWT_ASSETS_VOLUME` | 子容器挂载的资产卷名 |
 | `RDKWT_RUNS_VOLUME` | 子容器挂载的运行卷名 |
+| `RDKWT_CACHE_DIR` | Controller 内缓存目录 |
 | `RDKWT_CACHE_VOLUME` | 缓存卷名 |
+| `RDKWT_CPU_RUNNER_IMAGE` | 固定 CPU Runner 镜像 |
+| `RDKWT_GPU_ENABLED` | 是否允许 GPU Runner，默认 false |
+| `RDKWT_GPU_RUNNER_IMAGE` | 固定 GPU Runner 镜像 |
+| `RDKWT_GPU_DEVICE_IDS` | 管理员允许的 GPU ID，`all` 或逗号分隔整数 |
+| `RDKWT_GPU_SHM_SIZE` | GPU Runner 共享内存大小 |
 | `RDKWT_MAX_CONCURRENT_RUNS` | 并发上限，P0 为 1 |
 | `RDKWT_MIN_FREE_DISK_BYTES` | 最低剩余磁盘 |
 | `RDKWT_DEFAULT_TIMEOUT_SECONDS` | 默认总超时 |
@@ -2177,6 +2183,18 @@ ResNet18 和 20 份 ImageNet 样本依次生成 `nash-e`/单 Core 与 `nash-p`/�
 - GPU Runner。
 - 缓存。
 
+退出条件：CPU S100/S600 真实转换均完成 HBRuntime 与 `hb_verifier`，多输入/动态 Shape、
+任务比较和缓存通过自动化契约；GPU 控制面默认关闭且不影响 CPU，并在兼容 GPU 主机上另行
+完成实机门禁。
+
+实施状态（2026-07-19）：M3 的 CPU 发布路径、多输入/动态 Shape、任务比较、缓存以及 GPU
+固定镜像/DeviceRequest/Preflight 控制面已完成。真实 ResNet18 S100/S600 Controller 门禁已
+同时通过编译、HBRuntime、`hb_verifier`、下载和导出，重复 S100 任务也确认持久缓存命中。
+本开发机 GPU 代际不受 OE 3.7 支持，因此 GPU 实机门禁按设计延后，部署默认
+`RDKWT_GPU_ENABLED=false`；不得据此宣称 GPU 转换已验证。详细决策和复跑步骤见
+[ADR-016](./adr/ADR-016-m3-verification-comparison-and-optional-gpu.md) 与
+[M3 发布检查表](./M3_RELEASE_CHECKLIST.md)。
+
 ### M4：板端
 
 交付：
@@ -2202,6 +2220,12 @@ ResNet18 和 20 份 ImageNet 样本依次生成 `nash-e`/单 Core 与 `nash-p`/�
 | ADR-008 | S100/S600 使用版本化 Target Profile |
 | ADR-009 | Runner 默认禁网且不挂 Docker Socket |
 | ADR-010 | 专有 OE 基础镜像由本地/私有环境构建 |
+| ADR-011 | Runner Python、Named Volume 与固定入口边界 |
+| ADR-012 | OpenExplorer 3.7 ResNet18 S100/S600 基线 |
+| ADR-013 | 项目与资产目录纵向闭环 |
+| ADR-014 | 持久任务编排与 Web 产品闭环 |
+| ADR-015 | 校准输入与真实发布门禁 |
+| ADR-016 | 数值验证、多输入、比较、缓存与可选 GPU |
 
 ## 33. 仍需通过 Spike 验证的技术点
 
@@ -2215,10 +2239,13 @@ M1 已完成 ResNet18 在 S100/S600 上的真实 `hb_compile check/compile`、�
 [ADR-013：M2 项目与资产目录纵向闭环](./adr/ADR-013-m2-project-asset-catalog.md)。
 持久队列、模型检查、日志、恢复与结果导出的完整 M2 决策见
 [ADR-014：M2 持久任务编排与 Web 产品闭环](./adr/ADR-014-m2-orchestration-and-web-product.md)。
+M3 已完成 CPU HBRuntime/`hb_verifier` 的真实 S100/S600 门禁；多输入、比较、缓存和可选 GPU
+控制面结论见 [ADR-016](./adr/ADR-016-m3-verification-comparison-and-optional-gpu.md)。
 当前仍需验证的项目如下。
 
-1. CPU 镜像已验证为 Python 3.10.12；GPU 镜像的 Runner 依赖仍待验证。
-2. GPU Runner 所需的共享内存和 DeviceRequest 参数。
+1. CPU 镜像已验证为 Python 3.10.12；GPU 镜像的 Runner 依赖仍待在兼容显卡主机验证。
+2. GPU Runner 的固定 DeviceRequest 与共享内存构建参数已有单元覆盖，实际 Driver/Toolkit/
+   OE 组合和 GPU Smoke 仍待兼容主机验证。
 3. `hb_compile` 收到 SIGTERM 后的退出行为及中间文件完整性。
 4. Controller 非 root 用户访问 Docker Socket 和 Named Volume 的 UID/GID 策略。
 5. 任务容器生成文件的所有权回收方式。

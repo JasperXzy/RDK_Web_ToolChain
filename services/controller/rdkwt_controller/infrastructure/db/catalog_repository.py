@@ -175,9 +175,7 @@ class CatalogRepository:
                 )
             )
             if active_run_count:
-                raise ValueError(
-                    "projects with queued or running tasks cannot be deleted"
-                )
+                raise ValueError("projects with queued or running tasks cannot be deleted")
             runs = session.scalars(
                 select(ConversionRun).where(ConversionRun.project_id == project_id)
             ).all()
@@ -207,9 +205,7 @@ class CatalogRepository:
             candidate_blob_keys: set[str] = set()
             for asset in assets.values():
                 model_references = session.scalar(
-                    select(func.count(ModelVersion.id)).where(
-                        ModelVersion.asset_id == asset.id
-                    )
+                    select(func.count(ModelVersion.id)).where(ModelVersion.asset_id == asset.id)
                 )
                 calibration_references = session.scalar(
                     select(func.count(CalibrationSample.id)).where(
@@ -328,9 +324,7 @@ class CatalogRepository:
             session.flush()
             return self._serialize_model_version(row)
 
-    def mark_model_inspection_pending(
-        self, version_id: str, *, run_id: str
-    ) -> dict[str, Any]:
+    def mark_model_inspection_pending(self, version_id: str, *, run_id: str) -> dict[str, Any]:
         with self._session_factory.begin() as session:
             row = session.scalar(
                 select(ModelVersion)
@@ -404,6 +398,8 @@ class CatalogRepository:
                 raise KeyError(f"unknown calibration version: {version_id}")
             if version.status != "DRAFT":
                 raise ValueError("calibration version is immutable after finalization")
+            if version.source_type == "npy_multi":
+                raise ValueError("multi-input calibration requires an aligned ZIP archive")
             if len(version.samples) >= 100:
                 raise ValueError("calibration version cannot contain more than 100 samples")
             if (version.source_type == "npy") != (blob.mime_type == "application/x-npy"):
@@ -448,16 +444,17 @@ class CatalogRepository:
                 raise KeyError(f"unknown calibration version: {version_id}")
             if version.status != "DRAFT":
                 raise ValueError("calibration version is immutable after finalization")
-            if len(version.samples) + len(blobs) > 100:
-                raise ValueError("calibration version cannot contain more than 100 samples")
+            maximum_files = 400 if version.source_type == "npy_multi" else 100
+            if len(version.samples) + len(blobs) > maximum_files:
+                raise ValueError(
+                    f"calibration version cannot contain more than {maximum_files} files"
+                )
             payloads: list[dict[str, Any]] = []
             for offset, blob in enumerate(blobs):
-                if (version.source_type == "npy") != (
+                if (version.source_type in {"npy", "npy_multi"}) != (
                     blob.mime_type == "application/x-npy"
                 ):
-                    raise ValueError(
-                        "calibration sample does not match the version source type"
-                    )
+                    raise ValueError("calibration sample does not match the version source type")
                 asset, storage_reused = self._get_or_create_asset(
                     session, f"calibration-{version.source_type}", blob
                 )
@@ -485,18 +482,14 @@ class CatalogRepository:
                 .where(CalibrationVersion.id == version_id)
                 .options(
                     selectinload(CalibrationVersion.calibration_set),
-                    selectinload(CalibrationVersion.samples).selectinload(
-                        CalibrationSample.asset
-                    ),
+                    selectinload(CalibrationVersion.samples).selectinload(CalibrationSample.asset),
                 )
             )
             if row is None:
                 raise KeyError(f"unknown calibration version: {version_id}")
             return self._serialize_calibration_version(row, include_samples=True)
 
-    def calibration_sample_input(
-        self, version_id: str, ordinal: int
-    ) -> dict[str, Any]:
+    def calibration_sample_input(self, version_id: str, ordinal: int) -> dict[str, Any]:
         with self._session_factory() as session:
             row = session.scalar(
                 select(CalibrationSample)
@@ -522,9 +515,7 @@ class CatalogRepository:
                 select(CalibrationVersion)
                 .where(CalibrationVersion.id == version_id)
                 .options(
-                    selectinload(CalibrationVersion.samples).selectinload(
-                        CalibrationSample.asset
-                    )
+                    selectinload(CalibrationVersion.samples).selectinload(CalibrationSample.asset)
                 )
             )
             if row is None:
@@ -557,9 +548,7 @@ class CatalogRepository:
                 .where(CalibrationVersion.id == version_id)
                 .options(
                     selectinload(CalibrationVersion.calibration_set),
-                    selectinload(CalibrationVersion.samples).selectinload(
-                        CalibrationSample.asset
-                    ),
+                    selectinload(CalibrationVersion.samples).selectinload(CalibrationSample.asset),
                 )
             )
             if version is None:
@@ -567,7 +556,9 @@ class CatalogRepository:
             if version.status != "DRAFT":
                 raise ValueError("calibration version is already finalized")
             version.status = "READY"
-            version.sample_count = len(version.samples)
+            version.sample_count = int(
+                materialized.validation_report.get("sample_count", len(version.samples))
+            )
             version.source_path = materialized.source_path
             version.manifest_key = materialized.manifest_key
             version.manifest_sha256 = materialized.manifest_sha256
@@ -628,9 +619,7 @@ class CatalogRepository:
             )
 
     @staticmethod
-    def _get_or_create_asset(
-        session: Session, kind: str, blob: StoredBlob
-    ) -> tuple[Asset, bool]:
+    def _get_or_create_asset(session: Session, kind: str, blob: StoredBlob) -> tuple[Asset, bool]:
         asset = session.scalar(
             select(Asset).where(
                 Asset.kind == kind,
@@ -735,9 +724,7 @@ class CatalogRepository:
             "compatibility_status": row.compatibility_status,
             "inspection": row.inspection,
             "inspection_run_id": row.inspection_run_id,
-            "inspected_at": (
-                None if row.inspected_at is None else row.inspected_at.isoformat()
-            ),
+            "inspected_at": (None if row.inspected_at is None else row.inspected_at.isoformat()),
             "asset": {
                 "id": row.asset.id,
                 "sha256": row.asset.sha256,
@@ -754,9 +741,7 @@ class CatalogRepository:
             "project_id": row.project_id,
             "name": row.name,
             "description": row.description,
-            "versions": [
-                cls._serialize_calibration_version(version) for version in row.versions
-            ],
+            "versions": [cls._serialize_calibration_version(version) for version in row.versions],
             "created_at": row.created_at.isoformat(),
             "updated_at": row.updated_at.isoformat(),
         }
@@ -765,18 +750,27 @@ class CatalogRepository:
     def _serialize_calibration_version(
         cls, row: CalibrationVersion, *, include_samples: bool = False
     ) -> dict[str, Any]:
+        sample_count = row.sample_count
+        physical_file_count: int | None = None
+        if row.source_type == "npy_multi":
+            if row.status == "DRAFT" and row.samples:
+                sample_count = len(
+                    {str((sample.validation or {}).get("sample_key")) for sample in row.samples}
+                )
+                physical_file_count = len(row.samples)
+            elif isinstance(row.validation_report, dict):
+                physical_file_count = row.validation_report.get("physical_file_count")
         payload: dict[str, Any] = {
             "id": row.id,
             "calibration_set_id": row.calibration_set_id,
             "source_type": row.source_type,
             "status": row.status,
-            "sample_count": row.sample_count,
+            "sample_count": sample_count,
+            "physical_file_count": physical_file_count,
             "manifest_sha256": row.manifest_sha256,
             "validation_report": row.validation_report,
             "created_at": row.created_at.isoformat(),
-            "finalized_at": (
-                None if row.finalized_at is None else row.finalized_at.isoformat()
-            ),
+            "finalized_at": (None if row.finalized_at is None else row.finalized_at.isoformat()),
         }
         if include_samples:
             payload["samples"] = [cls._serialize_sample(sample) for sample in row.samples]

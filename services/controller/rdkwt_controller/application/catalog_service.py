@@ -203,10 +203,10 @@ class CatalogService:
         description: str,
         source_type: str = "images",
     ) -> dict[str, Any]:
-        if source_type not in {"images", "npy"}:
+        if source_type not in {"images", "npy", "npy_multi"}:
             raise CatalogError(
                 "CALIBRATION_SOURCE_TYPE_INVALID",
-                "source_type must be images or npy",
+                "source_type must be images, npy, or npy_multi",
             )
         cleaned_name = _clean_text(name, "name", maximum=200)
         cleaned_description = _clean_text(
@@ -226,9 +226,7 @@ class CatalogService:
         )
 
     def list_calibration_sets(self, project_id: str) -> list[dict[str, Any]]:
-        return self._project_operation(
-            lambda: self.repository.list_calibration_sets(project_id)
-        )
+        return self._project_operation(lambda: self.repository.list_calibration_sets(project_id))
 
     async def upload_calibration_sample(
         self,
@@ -244,6 +242,11 @@ class CatalogService:
                 "CALIBRATION_VERSION_IMMUTABLE",
                 "calibration version is immutable after finalization",
                 status_code=409,
+            )
+        if existing["source_type"] == "npy_multi":
+            raise CatalogError(
+                "CALIBRATION_MULTI_INPUT_ARCHIVE_REQUIRED",
+                "multi-input calibration must be uploaded as one aligned ZIP archive",
             )
         if existing["sample_count"] >= 100:
             raise CatalogError(
@@ -287,7 +290,14 @@ class CatalogService:
                 "calibration version is immutable after finalization",
                 status_code=409,
             )
-        remaining = 100 - int(existing["sample_count"])
+        if existing["source_type"] == "npy_multi" and existing["sample_count"]:
+            raise CatalogError(
+                "CALIBRATION_ARCHIVE_CONFLICT",
+                "multi-input calibration accepts exactly one ZIP archive",
+                status_code=409,
+            )
+        maximum_files = 400 if existing["source_type"] == "npy_multi" else 100
+        remaining = maximum_files - int(existing["sample_count"])
         try:
             blobs = await self.asset_store.ingest_calibration_archive(
                 chunks,
@@ -304,17 +314,19 @@ class CatalogService:
                 blobs=blobs,
             )
         except KeyError as exc:
-            raise CatalogError(
-                "CALIBRATION_VERSION_NOT_FOUND", str(exc), status_code=404
-            ) from exc
+            raise CatalogError("CALIBRATION_VERSION_NOT_FOUND", str(exc), status_code=404) from exc
         except ValueError as exc:
-            raise CatalogError(
-                "CALIBRATION_ARCHIVE_CONFLICT", str(exc), status_code=409
-            ) from exc
+            raise CatalogError("CALIBRATION_ARCHIVE_CONFLICT", str(exc), status_code=409) from exc
+        imported_count = len(samples)
+        if existing["source_type"] == "npy_multi":
+            imported_count = len(
+                {str((item.get("validation") or {}).get("sample_key")) for item in samples}
+            )
         return {
             "version_id": version_id,
             "source_type": existing["source_type"],
-            "imported_count": len(samples),
+            "imported_count": imported_count,
+            "imported_file_count": len(samples),
             "samples": samples,
         }
 
@@ -324,10 +336,8 @@ class CatalogService:
         except KeyError as exc:
             raise CatalogError("CALIBRATION_VERSION_NOT_FOUND", str(exc), status_code=404) from exc
 
-    def calibration_sample_file(
-        self, version_id: str, ordinal: int
-    ) -> tuple[Path, dict[str, Any]]:
-        if ordinal < 0 or ordinal >= 100:
+    def calibration_sample_file(self, version_id: str, ordinal: int) -> tuple[Path, dict[str, Any]]:
+        if ordinal < 0 or ordinal >= 400:
             raise CatalogError(
                 "CALIBRATION_SAMPLE_NOT_FOUND",
                 "calibration sample ordinal is outside the supported range",
@@ -341,9 +351,7 @@ class CatalogService:
                 size_bytes=metadata["size_bytes"],
             )
         except KeyError as exc:
-            raise CatalogError(
-                "CALIBRATION_SAMPLE_NOT_FOUND", str(exc), status_code=404
-            ) from exc
+            raise CatalogError("CALIBRATION_SAMPLE_NOT_FOUND", str(exc), status_code=404) from exc
         except AssetStoreError as exc:
             raise self._asset_error(exc) from exc
         return path, metadata
@@ -360,9 +368,7 @@ class CatalogService:
                 status_code=409,
             )
         if not source["samples"]:
-            raise CatalogError(
-                "CALIBRATION_EMPTY", "cannot finalize an empty calibration version"
-            )
+            raise CatalogError("CALIBRATION_EMPTY", "cannot finalize an empty calibration version")
         try:
             materialized = self.asset_store.materialize_calibration(
                 version_id, source["source_type"], source["samples"]
@@ -373,9 +379,7 @@ class CatalogService:
             return self.repository.finalize_calibration_version(version_id, materialized)
         except Exception as exc:
             try:
-                self.asset_store.delete_unreferenced(
-                    blob_keys=[], version_ids=[version_id]
-                )
+                self.asset_store.delete_unreferenced(blob_keys=[], version_ids=[version_id])
             except (AssetStoreError, OSError):
                 logger.exception(
                     "calibration metadata update failed and materialization cleanup also failed"

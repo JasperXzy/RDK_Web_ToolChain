@@ -9,7 +9,7 @@ import stat
 import uuid
 import zipfile
 from collections.abc import AsyncIterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -107,10 +107,10 @@ def _npy_validation(path: Path) -> dict[str, Any]:
             "CALIBRATION_NPY_ENDIAN_UNSUPPORTED",
             "big-endian NPY samples are not supported",
         )
-    if not 1 <= array.ndim <= 4 or any(int(item) < 1 for item in array.shape):
+    if not 0 <= array.ndim <= 4 or any(int(item) < 1 for item in array.shape):
         raise AssetStoreError(
             "CALIBRATION_NPY_SHAPE_INVALID",
-            "NPY shape must contain one to four positive dimensions",
+            "NPY shape must contain zero to four positive dimensions",
         )
     if not array.flags.c_contiguous:
         raise AssetStoreError(
@@ -188,7 +188,7 @@ class AssetStore:
         display_name = validate_display_filename(display_name)
         if kind not in {"model", "calibration"}:
             raise AssetStoreError("UPLOAD_KIND_INVALID", "unsupported asset kind")
-        if calibration_source_type not in {"images", "npy"}:
+        if calibration_source_type not in {"images", "npy", "npy_multi"}:
             raise AssetStoreError(
                 "CALIBRATION_SOURCE_TYPE_INVALID", "unsupported calibration source type"
             )
@@ -196,9 +196,7 @@ class AssetStore:
         validation: dict[str, Any] | None = None
         if kind == "model":
             if suffix != ".onnx":
-                raise AssetStoreError(
-                    "MODEL_EXTENSION_INVALID", "model filename must end in .onnx"
-                )
+                raise AssetStoreError("MODEL_EXTENSION_INVALID", "model filename must end in .onnx")
             mime_type = "application/onnx"
         elif calibration_source_type == "images":
             detected = _image_type(prefix)
@@ -248,8 +246,7 @@ class AssetStore:
             ):
                 raise AssetStoreError(
                     "BLOB_INTEGRITY_FAILED",
-                    "existing content-addressed blob failed integrity validation: "
-                    f"{blob.sha256}",
+                    f"existing content-addressed blob failed integrity validation: {blob.sha256}",
                 )
         else:
             os.replace(path, destination)
@@ -273,14 +270,18 @@ class AssetStore:
             )
         if kind not in {"model", "calibration"}:
             raise AssetStoreError("UPLOAD_KIND_INVALID", "unsupported asset kind")
-        if calibration_source_type not in {"images", "npy"}:
+        if calibration_source_type not in {"images", "npy", "npy_multi"}:
             raise AssetStoreError(
                 "CALIBRATION_SOURCE_TYPE_INVALID", "unsupported calibration source type"
             )
         suffix = Path(display_name).suffix.lower()
         if kind == "model" and suffix != ".onnx":
             raise AssetStoreError("MODEL_EXTENSION_INVALID", "model filename must end in .onnx")
-        if kind == "calibration" and calibration_source_type == "npy" and suffix != ".npy":
+        if (
+            kind == "calibration"
+            and calibration_source_type in {"npy", "npy_multi"}
+            and suffix != ".npy"
+        ):
             raise AssetStoreError(
                 "CALIBRATION_EXTENSION_MISMATCH", "direct NPY samples must end in .npy"
             )
@@ -293,9 +294,7 @@ class AssetStore:
             with temporary.open("xb") as handle:
                 async for chunk in chunks:
                     if not isinstance(chunk, bytes):
-                        raise AssetStoreError(
-                            "UPLOAD_INVALID", "upload stream returned non-bytes"
-                        )
+                        raise AssetStoreError("UPLOAD_INVALID", "upload stream returned non-bytes")
                     if not chunk:
                         continue
                     size_bytes += len(chunk)
@@ -346,7 +345,7 @@ class AssetStore:
             raise AssetStoreError(
                 "CALIBRATION_ARCHIVE_EXTENSION_INVALID", "archive filename must end in .zip"
             )
-        if source_type not in {"images", "npy"}:
+        if source_type not in {"images", "npy", "npy_multi"}:
             raise AssetStoreError(
                 "CALIBRATION_SOURCE_TYPE_INVALID", "unsupported calibration source type"
             )
@@ -360,9 +359,7 @@ class AssetStore:
             with archive_path.open("xb") as output:
                 async for chunk in chunks:
                     if not isinstance(chunk, bytes):
-                        raise AssetStoreError(
-                            "UPLOAD_INVALID", "upload stream returned non-bytes"
-                        )
+                        raise AssetStoreError("UPLOAD_INVALID", "upload stream returned non-bytes")
                     size_bytes += len(chunk)
                     if size_bytes > self.max_upload_bytes:
                         raise AssetStoreError(
@@ -385,7 +382,7 @@ class AssetStore:
                     "CALIBRATION_ARCHIVE_INVALID", f"ZIP archive cannot be read: {exc}"
                 ) from exc
             with archive:
-                entries: list[tuple[zipfile.ZipInfo, str]] = []
+                entries: list[tuple[zipfile.ZipInfo, str, str | None]] = []
                 names: set[str] = set()
                 total_uncompressed = 0
                 archive_entries = archive.infolist()
@@ -431,11 +428,21 @@ class AssetStore:
                             "CALIBRATION_ARCHIVE_COMPRESSION_UNSUPPORTED",
                             f"ZIP entry uses an unsupported compression method: {name}",
                         )
+                    if source_type == "npy_multi" and len(logical.parts) != 2:
+                        raise AssetStoreError(
+                            "CALIBRATION_ARCHIVE_PATH_INVALID",
+                            "multi-input ZIP entries must use <input_name>/<sample>.npy",
+                        )
+                    input_name = (
+                        validate_display_filename(logical.parts[0])
+                        if source_type == "npy_multi"
+                        else None
+                    )
                     basename = validate_display_filename(logical.name)
                     suffix = Path(basename).suffix.lower()
                     allowed = (
                         {".npy"}
-                        if source_type == "npy"
+                        if source_type in {"npy", "npy_multi"}
                         else {".bmp", ".jpeg", ".jpg", ".png"}
                     )
                     if suffix not in allowed:
@@ -443,7 +450,11 @@ class AssetStore:
                             "CALIBRATION_ARCHIVE_ENTRY_INVALID",
                             f"ZIP entry does not match {source_type} calibration: {name}",
                         )
-                    normalized = basename.casefold()
+                    normalized = (
+                        f"{input_name.casefold()}/{basename.casefold()}"
+                        if input_name is not None
+                        else basename.casefold()
+                    )
                     if normalized in names:
                         raise AssetStoreError(
                             "CALIBRATION_ARCHIVE_DUPLICATE_NAME",
@@ -469,11 +480,32 @@ class AssetStore:
                             "CALIBRATION_ARCHIVE_TOO_LARGE",
                             "ZIP uncompressed content exceeds the upload limit",
                         )
-                    entries.append((item, basename))
+                    entries.append((item, basename, input_name))
                 if not entries:
                     raise AssetStoreError(
                         "CALIBRATION_ARCHIVE_EMPTY", "ZIP archive contains no samples"
                     )
+                if source_type == "npy_multi":
+                    grouped: dict[str, set[str]] = {}
+                    for _item, basename, input_name in entries:
+                        assert input_name is not None
+                        grouped.setdefault(input_name, set()).add(basename)
+                    if not 2 <= len(grouped) <= 4:
+                        raise AssetStoreError(
+                            "CALIBRATION_MULTI_INPUT_COUNT_INVALID",
+                            "multi-input ZIP must contain two to four input directories",
+                        )
+                    sample_sets = list(grouped.values())
+                    if any(samples != sample_sets[0] for samples in sample_sets[1:]):
+                        raise AssetStoreError(
+                            "CALIBRATION_MULTI_INPUT_ALIGNMENT_INVALID",
+                            "each input directory must contain the same sample filenames",
+                        )
+                    if len(sample_sets[0]) > 100:
+                        raise AssetStoreError(
+                            "CALIBRATION_SAMPLE_LIMIT",
+                            "multi-input ZIP cannot contain more than 100 aligned samples",
+                        )
                 if len(entries) > maximum_entries:
                     raise AssetStoreError(
                         "CALIBRATION_SAMPLE_LIMIT",
@@ -482,7 +514,7 @@ class AssetStore:
                     )
                 staged: list[tuple[Path, StoredBlob]] = []
                 try:
-                    for item, basename in sorted(
+                    for item, basename, input_name in sorted(
                         entries, key=lambda value: value[0].filename
                     ):
                         entry_path = self.staging_root / f"{uuid.uuid4()}.entry.part"
@@ -492,9 +524,10 @@ class AssetStore:
                             prefix = bytearray()
                             extracted_size = 0
                             try:
-                                with archive.open(item, "r") as source, entry_path.open(
-                                    "xb"
-                                ) as output:
+                                with (
+                                    archive.open(item, "r") as source,
+                                    entry_path.open("xb") as output,
+                                ):
                                     while True:
                                         chunk = source.read(1024 * 1024)
                                         if not chunk:
@@ -515,14 +548,12 @@ class AssetStore:
                             except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
                                 raise AssetStoreError(
                                     "CALIBRATION_ARCHIVE_INVALID",
-                                    "ZIP entry failed integrity validation: "
-                                    f"{item.filename}",
+                                    f"ZIP entry failed integrity validation: {item.filename}",
                                 ) from exc
                             if extracted_size != item.file_size:
                                 raise AssetStoreError(
                                     "CALIBRATION_ARCHIVE_SIZE_MISMATCH",
-                                    "ZIP entry does not match its declared size: "
-                                    f"{item.filename}",
+                                    f"ZIP entry does not match its declared size: {item.filename}",
                                 )
                             blob = self._validate_staged_blob(
                                 entry_path,
@@ -533,6 +564,16 @@ class AssetStore:
                                 size_bytes=extracted_size,
                                 prefix=bytes(prefix),
                             )
+                            if input_name is not None:
+                                blob = replace(
+                                    blob,
+                                    display_name=f"{input_name}/{basename}",
+                                    validation={
+                                        **(blob.validation or {}),
+                                        "input_name": input_name,
+                                        "sample_key": basename,
+                                    },
+                                )
                             staged.append((entry_path, blob))
                             staged_entry = True
                         finally:
@@ -555,7 +596,7 @@ class AssetStore:
         source_type: str,
         samples: list[dict[str, Any]],
     ) -> MaterializedCalibration:
-        if source_type not in {"images", "npy"}:
+        if source_type not in {"images", "npy", "npy_multi"}:
             raise AssetStoreError(
                 "CALIBRATION_SOURCE_TYPE_INVALID", "unsupported calibration source type"
             )
@@ -585,12 +626,14 @@ class AssetStore:
                     "image/bmp": ".bmp",
                     "application/x-npy": ".npy",
                 }.get(mime_type)
-                if extension is None or (source_type == "npy") != (extension == ".npy"):
+                if extension is None or (source_type in {"npy", "npy_multi"}) != (
+                    extension == ".npy"
+                ):
                     raise AssetStoreError(
                         "CALIBRATION_FORMAT_INVALID",
                         f"stored sample does not match {source_type} calibration: {mime_type}",
                     )
-                if source_type == "npy":
+                if source_type in {"npy", "npy_multi"}:
                     validation = _npy_validation(source)
                 else:
                     with source.open("rb") as handle:
@@ -601,11 +644,42 @@ class AssetStore:
                             "stored image sample no longer matches its registered MIME type",
                         )
                     validation = {"format": "image", "mime_type": mime_type}
+                if source_type == "npy_multi":
+                    registered_validation = sample.get("validation")
+                    if not isinstance(registered_validation, dict):
+                        raise AssetStoreError(
+                            "CALIBRATION_MULTI_INPUT_METADATA_INVALID",
+                            "multi-input sample metadata is missing",
+                        )
+                    input_name = validate_display_filename(
+                        str(registered_validation.get("input_name") or "")
+                    )
+                    sample_key = validate_display_filename(
+                        str(registered_validation.get("sample_key") or "")
+                    )
+                    if Path(sample_key).suffix.lower() != ".npy":
+                        raise AssetStoreError(
+                            "CALIBRATION_MULTI_INPUT_METADATA_INVALID",
+                            "multi-input sample key must end in .npy",
+                        )
+                    validation = {
+                        **validation,
+                        "input_name": input_name,
+                        "sample_key": sample_key,
+                    }
+                    materialized_name = f"{input_name}/{sample_key}"
+                else:
+                    materialized_name = (
+                        f"{int(sample['ordinal']):04d}_{str(sample['sha256'])[:12]}{extension}"
+                    )
                 validations.append(validation)
-                materialized_name = (
-                    f"{int(sample['ordinal']):04d}_{str(sample['sha256'])[:12]}{extension}"
-                )
                 destination = source_root / materialized_name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if destination.exists():
+                    raise AssetStoreError(
+                        "CALIBRATION_MULTI_INPUT_ALIGNMENT_INVALID",
+                        f"duplicate materialized calibration sample: {materialized_name}",
+                    )
                 try:
                     os.link(source, destination, follow_symlinks=False)
                 except OSError:
@@ -637,9 +711,49 @@ class AssetStore:
                         "CALIBRATION_NPY_INCONSISTENT",
                         "all NPY samples must use the same Shape and dtype",
                     )
+            multi_inputs: list[dict[str, Any]] = []
+            logical_sample_count = len(samples)
+            if source_type == "npy_multi":
+                grouped: dict[str, list[dict[str, Any]]] = {}
+                for validation in validations:
+                    grouped.setdefault(str(validation["input_name"]), []).append(validation)
+                if not 2 <= len(grouped) <= 4:
+                    raise AssetStoreError(
+                        "CALIBRATION_MULTI_INPUT_COUNT_INVALID",
+                        "multi-input calibration requires two to four input groups",
+                    )
+                sample_sets = [
+                    {str(item["sample_key"]) for item in group} for group in grouped.values()
+                ]
+                if any(keys != sample_sets[0] for keys in sample_sets[1:]):
+                    raise AssetStoreError(
+                        "CALIBRATION_MULTI_INPUT_ALIGNMENT_INVALID",
+                        "multi-input calibration samples are not aligned by filename",
+                    )
+                logical_sample_count = len(sample_sets[0])
+                for input_name, group in sorted(grouped.items()):
+                    shapes = {tuple(item["shape"]) for item in group}
+                    dtypes = {str(item["dtype"]) for item in group}
+                    if len(shapes) != 1 or len(dtypes) != 1:
+                        raise AssetStoreError(
+                            "CALIBRATION_NPY_INCONSISTENT",
+                            f"all NPY samples for {input_name} must share Shape and dtype",
+                        )
+                    multi_inputs.append(
+                        {
+                            "name": input_name,
+                            "shape": group[0]["shape"],
+                            "dtype": group[0]["dtype"],
+                            "sample_count": len(group),
+                            "first_sample_statistics": group[0]["statistics"],
+                            "constant_sample_count": sum(
+                                1 for item in group if item["statistics"]["standard_deviation"] == 0
+                            ),
+                        }
+                    )
             duplicate_count = len(digests) - len(set(digests))
             warnings: list[str] = []
-            if len(samples) < 20:
+            if logical_sample_count < 20:
                 warnings.append(
                     "fewer than 20 samples; standard conversion will reject this version"
                 )
@@ -654,7 +768,8 @@ class AssetStore:
                 warnings.append(f"{constant_count} NPY samples contain constant values")
             validation_report: dict[str, Any] = {
                 "source_type": source_type,
-                "sample_count": len(samples),
+                "sample_count": logical_sample_count,
+                "physical_file_count": len(samples),
                 "minimum_recommended": 20,
                 "maximum_recommended": 100,
                 "duplicate_content_count": duplicate_count,
@@ -669,6 +784,8 @@ class AssetStore:
                         "constant_sample_count": constant_count,
                     }
                 )
+            elif source_type == "npy_multi":
+                validation_report["inputs"] = multi_inputs
             manifest = {
                 "schema_version": "1",
                 "calibration_version_id": version_id,
@@ -724,9 +841,7 @@ class AssetStore:
             raise AssetStoreError("BLOB_PATH_INVALID", "stored blob is not a regular file")
         return resolved
 
-    def resolve_verified_blob(
-        self, blob_key: str, *, sha256: str, size_bytes: int
-    ) -> Path:
+    def resolve_verified_blob(self, blob_key: str, *, sha256: str, size_bytes: int) -> Path:
         path = self.resolve_blob(blob_key)
         if path.stat().st_size != size_bytes or _sha256_file(path) != sha256:
             raise AssetStoreError(

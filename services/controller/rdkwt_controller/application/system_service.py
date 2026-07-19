@@ -31,8 +31,7 @@ class SystemService:
             details.update(docker_details)
             docker_info = docker_details["docker"]
             compatible = (
-                docker_info.get("os") == "linux"
-                and docker_info.get("architecture") == "amd64"
+                docker_info.get("os") == "linux" and docker_info.get("architecture") == "amd64"
             )
             checks.append(
                 {
@@ -43,6 +42,14 @@ class SystemService:
                         if compatible
                         else "Docker Engine must report linux/amd64"
                     ),
+                }
+            )
+            gpu = docker_details.get("gpu") or {}
+            checks.append(
+                {
+                    "id": "gpu-runner",
+                    "status": "PASS" if gpu.get("available") else "SKIPPED",
+                    "message": str(gpu.get("message") or "GPU status is unavailable"),
                 }
             )
             checks.append(
@@ -67,6 +74,11 @@ class SystemService:
                         "status": "BLOCKED",
                         "message": "Runner image cannot be verified until Docker is available",
                     },
+                    {
+                        "id": "gpu-runner",
+                        "status": "SKIPPED",
+                        "message": "GPU is optional and does not block CPU conversion",
+                    },
                 ]
             )
 
@@ -75,8 +87,9 @@ class SystemService:
             "state": self._settings.state_dir,
             "assets": self._settings.assets_dir,
             "runs": self._settings.runs_dir,
+            "cache": self._settings.effective_cache_dir,
         }.items():
-            storage[name] = self._check_storage(name, path, checks)
+            storage[name] = self._check_storage(name, path, checks, required=name != "cache")
         details["storage"] = storage
         details["minimum_free_bytes"] = self._settings.min_free_bytes
         details["runner_smoke_test"] = self._runner_smoke_test()
@@ -110,9 +123,7 @@ class SystemService:
             return {"status": "NOT_RUN", "run_id": None, "toolchain_versions": {}}
         attempt = latest["attempts"][-1]
         result = attempt.get("result")
-        versions = (
-            result.get("toolchain_versions", {}) if isinstance(result, dict) else {}
-        )
+        versions = result.get("toolchain_versions", {}) if isinstance(result, dict) else {}
         return {
             "status": latest["status"],
             "run_id": latest["id"],
@@ -121,7 +132,12 @@ class SystemService:
         }
 
     def _check_storage(
-        self, name: str, path: Path, checks: list[dict[str, Any]]
+        self,
+        name: str,
+        path: Path,
+        checks: list[dict[str, Any]],
+        *,
+        required: bool = True,
     ) -> dict[str, Any]:
         probe = path / f".rdkwt-preflight-{uuid.uuid4().hex}"
         writable = False
@@ -140,16 +156,13 @@ class SystemService:
                 probe.unlink()
         usage = shutil.disk_usage(path)
         enough_space = usage.free >= self._settings.min_free_bytes
-        status = "PASS" if writable and enough_space else "BLOCKED"
+        status = "PASS" if writable and enough_space else "BLOCKED" if required else "WARN"
         message = (
             f"{name} storage is writable with {usage.free} bytes free"
             if status == "PASS"
-            else error
-            or f"{name} storage has less than {self._settings.min_free_bytes} bytes free"
+            else error or f"{name} storage has less than {self._settings.min_free_bytes} bytes free"
         )
-        checks.append(
-            {"id": f"storage-{name}", "status": status, "message": message}
-        )
+        checks.append({"id": f"storage-{name}", "status": status, "message": message})
         return {
             "path": str(path),
             "writable": writable,

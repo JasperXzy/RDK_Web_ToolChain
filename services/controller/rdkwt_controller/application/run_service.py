@@ -44,9 +44,17 @@ ERROR_ADVICE = {
     "MODEL_PARSE_FAILED": "确认文件是完整的 ONNX，并在导出时关闭 external data。",
     "MODEL_EXTERNAL_DATA_UNSUPPORTED": "将模型重新导出为单个自包含 ONNX 文件。",
     "MODEL_IR_UNSUPPORTED": "使用受支持的 ONNX IR 版本重新导出模型。",
-    "MODEL_OPSET_UNSUPPORTED": "将模型转换到 opset 10～19。",
+    "MODEL_OPSET_UNSUPPORTED": "将模型转换到 opset 8～19。",
     "TOOL_CHECK_FAILED": "查看 check.log 中的不支持算子和 Shape 约束。",
     "TOOL_COMPILE_FAILED": "查看 compile.log，并核对输入预处理和平台参数。",
+    "TOOL_VERIFY_FAILED": "查看 verify.log，并核对验证输入和模型输出。",
+    "HBRUNTIME_UNAVAILABLE": "确认 CPU OpenExplorer 镜像包含 HBRuntime。",
+    "HBRUNTIME_INFERENCE_FAILED": "检查输入 Shape、dtype 与 HBRuntime 日志。",
+    "VERIFICATION_MODEL_MISSING": "检查编译产物是否包含 optimized/calibrated ONNX。",
+    "VERIFICATION_INPUT_MISSING": "确认预处理至少生成一组可用于验证的输入。",
+    "VERIFICATION_INPUT_INVALID": "检查验证输入的 Shape、dtype、布局和 NPY 完整性。",
+    "HB_VERIFIER_RESULT_INVALID": "下载 verify.log，确认 hb_verifier 输出格式。",
+    "CACHE_UNAVAILABLE": "确认缓存卷已挂载到 /cache 且 Runner 具有写权限。",
     "CALIBRATION_INVALID_SAMPLE": "检查校准集数量、图片格式和 Recipe。",
     "CALIBRATION_NPY_INVALID": "检查 NPY 的 Shape、dtype、字节序和有限数值。",
     "CALIBRATION_PREPROCESS_FAILED": "检查损坏图片、裁剪尺寸及归一化参数。",
@@ -154,20 +162,27 @@ def _verify_catalog_assets(
         if not isinstance(sample, dict):
             raise ValueError("calibration manifest contains an invalid sample")
         name = sample.get("materialized_name")
+        if not isinstance(name, str) or not name or "\\" in name:
+            raise ValueError("calibration manifest contains an invalid materialized name")
+        logical_name = PurePosixPath(name)
         if (
-            not isinstance(name, str)
-            or not name
-            or "/" in name
-            or "\\" in name
-            or name in expected_files
+            logical_name.is_absolute()
+            or "." in logical_name.parts
+            or ".." in logical_name.parts
+            or len(logical_name.parts) > 2
+            or logical_name.as_posix() in expected_files
         ):
             raise ValueError("calibration manifest contains an invalid materialized name")
-        expected_files[name] = sample
+        expected_files[logical_name.as_posix()] = sample
     actual_files: dict[str, Path] = {}
-    for path in calibration.iterdir():
-        if path.is_symlink() or not path.is_file():
+    for path in calibration.rglob("*"):
+        if path.is_symlink():
+            raise ValueError("calibration source contains a symbolic link")
+        if path.is_dir():
+            continue
+        if not path.is_file():
             raise ValueError("calibration source contains a non-regular sample")
-        actual_files[path.name] = path
+        actual_files[path.relative_to(calibration).as_posix()] = path
     if set(actual_files) != set(expected_files):
         raise ValueError("calibration source file list does not match its frozen manifest")
     for name, sample in expected_files.items():
@@ -224,18 +239,12 @@ class RunService:
     def submit_model_inspection(self, *, model_version_id: str) -> RunSubmission:
         source = self._catalog.model_inspection_input(model_version_id)
         if source.compatibility_status == "INSPECTING":
-            raise ValueError(
-                f"model inspection is already queued: {source.inspection_run_id}"
-            )
+            raise ValueError(f"model inspection is already queued: {source.inspection_run_id}")
         try:
-            model = _resolve_within(
-                self._settings.assets_dir, source.model_path, must_exist=True
-            )
+            model = _resolve_within(self._settings.assets_dir, source.model_path, must_exist=True)
         except FileNotFoundError as exc:
             raise ValueError("registered model asset does not exist") from exc
-        _verify_catalog_assets(
-            model=model, expected_model_sha256=source.model_sha256
-        )
+        _verify_catalog_assets(model=model, expected_model_sha256=source.model_sha256)
         request = self._request(
             adapter="onnx-inspection-1.0",
             pipeline=["inspect", "collect"],
@@ -253,9 +262,7 @@ class RunService:
             calibration_version_id=None,
             generated_yaml=None,
         )
-        self._catalog.mark_model_inspection_pending(
-            model_version_id, run_id=submission.run_id
-        )
+        self._catalog.mark_model_inspection_pending(model_version_id, run_id=submission.run_id)
         return submission
 
     def preview_conversion(
@@ -272,12 +279,14 @@ class RunService:
         optimize_level: str,
         sample_limit: int,
         jobs: int,
-        input_options: dict[str, Any] | None = None,
+        input_options: dict[str, Any] | list[dict[str, Any]] | None = None,
         calibration_options: dict[str, Any] | None = None,
+        verification_options: dict[str, Any] | None = None,
+        runner_mode: str = "cpu",
         max_time_per_fc: int = 0,
         cache_mode: str = "disable",
     ) -> dict[str, Any]:
-        inputs, configuration = self._prepare_conversion(
+        inputs, configuration, runner_image = self._prepare_conversion(
             profile_id=profile_id,
             model_version_id=model_version_id,
             calibration_version_id=calibration_version_id,
@@ -291,18 +300,21 @@ class RunService:
             jobs=jobs,
             input_options=input_options,
             calibration_options=calibration_options,
+            verification_options=verification_options,
+            runner_mode=runner_mode,
             max_time_per_fc=max_time_per_fc,
             cache_mode=cache_mode,
         )
-        preview = render_configuration_preview(
-            configuration, model_logical_path=inputs.model_path
-        )
+        preview = render_configuration_preview(configuration, model_logical_path=inputs.model_path)
         preview["model_inspection"] = inputs.model_inspection
         preview["resource_snapshot"] = {
             "model_sha256": inputs.model_sha256,
             "calibration_manifest_sha256": inputs.calibration_manifest_sha256,
             "calibration_sample_count": inputs.calibration_sample_count,
             "calibration_source_type": inputs.calibration_source_type,
+            "runner_mode": runner_mode,
+            "runner_image_id": runner_image.immutable_id,
+            "cache_key": configuration["compiler"]["cache_key"],
         }
         return preview
 
@@ -320,12 +332,14 @@ class RunService:
         optimize_level: str,
         sample_limit: int,
         jobs: int,
-        input_options: dict[str, Any] | None = None,
+        input_options: dict[str, Any] | list[dict[str, Any]] | None = None,
         calibration_options: dict[str, Any] | None = None,
+        verification_options: dict[str, Any] | None = None,
+        runner_mode: str = "cpu",
         max_time_per_fc: int = 0,
         cache_mode: str = "disable",
     ) -> RunSubmission:
-        inputs, configuration = self._prepare_conversion(
+        inputs, configuration, _runner_image = self._prepare_conversion(
             profile_id=profile_id,
             model_version_id=model_version_id,
             calibration_version_id=calibration_version_id,
@@ -339,19 +353,24 @@ class RunService:
             jobs=jobs,
             input_options=input_options,
             calibration_options=calibration_options,
+            verification_options=verification_options,
+            runner_mode=runner_mode,
             max_time_per_fc=max_time_per_fc,
             cache_mode=cache_mode,
         )
-        preview = render_configuration_preview(
-            configuration, model_logical_path=inputs.model_path
-        )
+        preview = render_configuration_preview(configuration, model_logical_path=inputs.model_path)
         profile = self._profiles.get(profile_id)
         request = self._request(
             adapter="openexplorer-3.7.0",
-            pipeline=["inspect", "check", "preprocess", "compile", "collect"],
+            pipeline=(
+                ["inspect", "check", "preprocess", "compile", "verify", "collect"]
+                if configuration["verification"]["mode"] != "disabled"
+                else ["inspect", "check", "preprocess", "compile", "collect"]
+            ),
             model_path=inputs.model_path,
             calibration_path=inputs.calibration_path,
             configuration=configuration,
+            runner_mode=runner_mode,
         )
         return self._persist_submission(
             kind="CONVERSION",
@@ -364,16 +383,16 @@ class RunService:
             generated_yaml=str(preview["yaml"]),
         )
 
-    def _prepare_conversion(self, **options: Any) -> tuple[Any, dict[str, Any]]:
+    def _prepare_conversion(self, **options: Any) -> tuple[Any, dict[str, Any], Any]:
         profile = self._profiles.get(str(options["profile_id"]))
+        runner_mode = str(options.get("runner_mode") or "cpu")
+        runner_image = self._docker.resolve_runner_image(runner_mode)
         inputs = self._catalog.resolve_conversion_inputs(
             model_version_id=str(options["model_version_id"]),
             calibration_version_id=str(options["calibration_version_id"]),
         )
         try:
-            model = _resolve_within(
-                self._settings.assets_dir, inputs.model_path, must_exist=True
-            )
+            model = _resolve_within(self._settings.assets_dir, inputs.model_path, must_exist=True)
             calibration = _resolve_within(
                 self._settings.assets_dir, inputs.calibration_path, must_exist=True
             )
@@ -397,6 +416,38 @@ class RunService:
             raise ValueError("output_prefix contains unsupported characters")
         calibration_options = copy.deepcopy(options.get("calibration_options") or {})
         calibration_options["sample_limit"] = options["sample_limit"]
+        cache_mode = str(options.get("cache_mode") or "disable")
+        cache_key = None
+        if cache_mode != "disable":
+            cache_material = {
+                "schema_version": "1",
+                "adapter": "openexplorer-3.7.0",
+                "runner_image_id": runner_image.immutable_id,
+                "profile": profile.snapshot(),
+                "model_sha256": inputs.model_sha256,
+                "calibration_manifest_sha256": inputs.calibration_manifest_sha256,
+                "input_options": options.get("input_options"),
+                "calibration_options": calibration_options,
+                "compiler_options": {
+                    key: options.get(key)
+                    for key in (
+                        "core_num",
+                        "max_l2m_size",
+                        "compile_mode",
+                        "balance_factor",
+                        "optimize_level",
+                        "jobs",
+                        "max_time_per_fc",
+                    )
+                },
+            }
+            encoded = json.dumps(
+                cache_material,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+            cache_key = hashlib.sha256(encoded).hexdigest()
         configuration = normalize_configuration(
             profile=profile,
             inspection=inputs.model_inspection,
@@ -411,13 +462,15 @@ class RunService:
                 "optimize_level": options["optimize_level"],
                 "jobs": options["jobs"],
                 "max_time_per_fc": options.get("max_time_per_fc", 0),
-                "cache_mode": options.get("cache_mode", "disable"),
+                "cache_mode": cache_mode,
+                "cache_key": cache_key,
             },
             sample_count=inputs.calibration_sample_count,
             calibration_source_type=inputs.calibration_source_type,
             calibration_validation_report=inputs.calibration_validation_report,
+            verification_options=options.get("verification_options"),
         )
-        return inputs, configuration
+        return inputs, configuration, runner_image
 
     def _request(
         self,
@@ -427,6 +480,7 @@ class RunService:
         model_path: str,
         calibration_path: str | None,
         configuration: dict[str, Any],
+        runner_mode: str = "cpu",
     ) -> dict[str, Any]:
         run_id = str(uuid.uuid4())
         attempt = 1
@@ -435,7 +489,7 @@ class RunService:
             "run_id": run_id,
             "attempt": attempt,
             "adapter": adapter,
-            "runner_mode": "cpu",
+            "runner_mode": runner_mode,
             "pipeline": pipeline,
             "paths": {
                 "model": model_path,
@@ -462,12 +516,11 @@ class RunService:
         generated_yaml: str | None,
     ) -> RunSubmission:
         validate_payload("request", request)
-        image = self._docker.resolve_cpu_image()
+        runner_mode = str(request["runner_mode"])
+        image = self._docker.resolve_runner_image(runner_mode)
         run_id = str(request["run_id"])
         attempt = int(request["attempt"])
-        request_path = (
-            self._settings.runs_dir / request["paths"]["attempt_root"] / "request.json"
-        )
+        request_path = self._settings.runs_dir / request["paths"]["attempt_root"] / "request.json"
         _atomic_json(request_path, request)
         run = ConversionRun(
             id=run_id,
@@ -479,6 +532,8 @@ class RunService:
             profile_sha256=profile_sha256,
             runner_image_reference=image.configured_reference,
             runner_image_id=image.immutable_id,
+            runner_mode=runner_mode,
+            cache_key=request.get("configuration", {}).get("compiler", {}).get("cache_key"),
             contract_version="1.0",
             app_version=__version__,
             generated_yaml=generated_yaml,
@@ -515,11 +570,10 @@ class RunService:
                     attempt=attempt,
                     image_reference=record.runner_image_reference,
                     image_id=record.runner_image_id,
+                    runner_mode=record.runner_mode,
                 )
                 if not self._repository.set_running(run_id, attempt, container.id):
-                    self._docker.remove_managed(
-                        container.id, run_id=run_id, attempt=attempt
-                    )
+                    self._docker.remove_managed(container.id, run_id=run_id, attempt=attempt)
                     container = None
                     self._finish_cancelled(record, result=None, exit_code=None)
                     return
@@ -651,15 +705,9 @@ class RunService:
             inspection=inspection,
         )
 
-    def mark_recovery_interrupted(
-        self, record: ExecutionRecord, message: str
-    ) -> None:
-        self._repository.mark_interrupted(
-            record.run_id, record.attempt, message
-        )
-        self._record_model_inspection(
-            record, "INTERRUPTED", None, message
-        )
+    def mark_recovery_interrupted(self, record: ExecutionRecord, message: str) -> None:
+        self._repository.mark_interrupted(record.run_id, record.attempt, message)
+        self._record_model_inspection(record, "INTERRUPTED", None, message)
 
     def cancel(self, run_id: str) -> dict[str, Any]:
         detail = self._repository.get(run_id)
@@ -691,9 +739,7 @@ class RunService:
         request["attempt"] = attempt_number
         request["paths"]["attempt_root"] = f"{run_id}/attempts/{attempt_number}"
         validate_payload("request", request)
-        request_path = (
-            self._settings.runs_dir / request["paths"]["attempt_root"] / "request.json"
-        )
+        request_path = self._settings.runs_dir / request["paths"]["attempt_root"] / "request.json"
         _atomic_json(request_path, request)
         self._repository.retry(
             run_id,
@@ -705,9 +751,7 @@ class RunService:
             ),
         )
         if detail["kind"] == "MODEL_INSPECTION" and detail["model_version_id"]:
-            self._catalog.mark_model_inspection_pending(
-                detail["model_version_id"], run_id=run_id
-            )
+            self._catalog.mark_model_inspection_pending(detail["model_version_id"], run_id=run_id)
         return RunSubmission(run_id=run_id, attempt=attempt_number, status="QUEUED")
 
     def result_detail(self, run_id: str) -> dict[str, Any]:
@@ -719,9 +763,9 @@ class RunService:
         artifacts: list[dict[str, Any]] = []
         if isinstance(result, dict):
             with suppress(Exception):
-                artifacts = self._load_artifact_manifest(
-                    run_id, int(latest["number"]), result
-                )["artifacts"]
+                artifacts = self._load_artifact_manifest(run_id, int(latest["number"]), result)[
+                    "artifacts"
+                ]
         detail["artifacts"] = artifacts
         detail["summary"] = self._result_summary(detail, result, artifacts)
         if detail["error"] is not None:
@@ -731,15 +775,84 @@ class RunService:
             )
         return detail
 
+    def compare_runs(self, run_ids: list[str]) -> dict[str, Any]:
+        if not 2 <= len(run_ids) <= 4 or len(set(run_ids)) != len(run_ids):
+            raise ValueError("comparison requires two to four unique runs")
+        details = [self.result_detail(run_id) for run_id in run_ids]
+        for detail in details:
+            if detail["kind"] != "CONVERSION" or detail["status"] != "SUCCEEDED":
+                raise ValueError("only successful conversion runs can be compared")
+        model_ids = {detail["model_version_id"] for detail in details}
+        if len(model_ids) != 1 or None in model_ids:
+            raise ValueError("compared runs must use the same model version")
+
+        rows: list[dict[str, Any]] = []
+        for detail in details:
+            configuration = detail["request"].get("configuration") or {}
+            calibration = configuration.get("calibration") or {}
+            compiler = configuration.get("compiler") or {}
+            summary = detail.get("summary") or {}
+            static_performance = summary.get("static_performance") or {}
+            quantization = summary.get("quantization") or {}
+            verification = summary.get("verification") or {}
+            minimum = (verification.get("hb_verifier") or {}).get("minimum_cosine")
+            hbm = summary.get("hbm") or {}
+            row = {
+                "run_id": detail["id"],
+                "profile_id": detail["profile_id"],
+                "runner_mode": detail["runner_mode"],
+                "calibration_version_id": detail["calibration_version_id"],
+                "calibration_source_type": calibration.get("source_type"),
+                "calibration_algorithm": calibration.get("algorithm"),
+                "sample_limit": calibration.get("sample_limit"),
+                "compile_mode": compiler.get("compile_mode"),
+                "core_num": compiler.get("core_num"),
+                "optimize_level": compiler.get("optimize_level"),
+                "max_l2m_size": compiler.get("max_l2m_size"),
+                "hbm_size_bytes": hbm.get("size_bytes"),
+                "fps": static_performance.get("fps"),
+                "latency_us": static_performance.get("latency_us"),
+                "ddr_bytes_per_run": static_performance.get("ddr_bytes_per_run"),
+                "l2m_bytes_per_run": static_performance.get("l2m_bytes_per_run"),
+                "minimum_quantized_cosine": (
+                    (quantization.get("minimum_node") or {}).get("quantized_cosine")
+                ),
+                "minimum_verifier_cosine": (
+                    minimum.get("cosine_similarity") if isinstance(minimum, dict) else None
+                ),
+                "hbruntime_duration_ms": ((verification.get("hbruntime") or {}).get("duration_ms")),
+                "total_duration_ms": summary.get("total_duration_ms"),
+                "cache_hit": (detail.get("cache") or {}).get("hit"),
+            }
+            rows.append(row)
+
+        common: dict[str, Any] = {}
+        differences: dict[str, list[Any]] = {}
+        for field in rows[0]:
+            if field == "run_id":
+                continue
+            values = [row[field] for row in rows]
+            encoded = {json.dumps(value, ensure_ascii=False, sort_keys=True) for value in values}
+            if len(encoded) == 1:
+                common[field] = values[0]
+            else:
+                differences[field] = values
+        return {
+            "schema_version": "1",
+            "model_version_id": next(iter(model_ids)),
+            "run_ids": run_ids,
+            "common": common,
+            "differences": differences,
+            "rows": rows,
+        }
+
     def artifact_file(
         self, run_id: str, attempt: int, artifact_index: int
     ) -> tuple[Path, dict[str, Any]]:
         detail = self._repository.get(run_id)
         if detail is None:
             raise KeyError(f"unknown run: {run_id}")
-        selected = next(
-            (item for item in detail["attempts"] if item["number"] == attempt), None
-        )
+        selected = next((item for item in detail["attempts"] if item["number"] == attempt), None)
         if selected is None or not isinstance(selected.get("result"), dict):
             raise KeyError(f"run attempt has no result: {run_id}/{attempt}")
         manifest = self._load_artifact_manifest(run_id, attempt, selected["result"])
@@ -771,12 +884,7 @@ class RunService:
     def log_stream_file(self, run_id: str, attempt: int) -> Path:
         self._repository.execution(run_id, attempt)
         return (
-            self._settings.runs_dir
-            / run_id
-            / "attempts"
-            / str(attempt)
-            / "logs"
-            / "stream.jsonl"
+            self._settings.runs_dir / run_id / "attempts" / str(attempt) / "logs" / "stream.jsonl"
         )
 
     def export_run(self, run_id: str) -> Path:
@@ -796,9 +904,7 @@ class RunService:
                     "run": detail,
                     "export_scope": {
                         "includes_model": bool(detail["model_version_id"]),
-                        "includes_calibration_manifest": bool(
-                            detail["calibration_version_id"]
-                        ),
+                        "includes_calibration_manifest": bool(detail["calibration_version_id"]),
                         "includes_raw_calibration_samples": False,
                     },
                 }
@@ -845,9 +951,7 @@ class RunService:
                                     f"attempt/{path.relative_to(attempt_root).as_posix()}",
                                 )
                 if detail["model_version_id"]:
-                    model = self._catalog.model_inspection_input(
-                        detail["model_version_id"]
-                    )
+                    model = self._catalog.model_inspection_input(detail["model_version_id"])
                     model_path = _resolve_within(
                         self._settings.assets_dir, model.model_path, must_exist=True
                     )
@@ -904,11 +1008,10 @@ class RunService:
             else {}
         )
         quantization = (
-            compile_metrics.get("quantization", {})
-            if isinstance(compile_metrics, dict)
-            else {}
+            compile_metrics.get("quantization", {}) if isinstance(compile_metrics, dict) else {}
         )
         warnings = result.get("warnings", [])
+        verification = result.get("metrics", {}).get("verify", {})
         advice_artifact_count = sum(
             1 for item in artifacts if item["kind"] in {"advice_csv", "advice_json"}
         )
@@ -923,6 +1026,8 @@ class RunService:
             "steps": result.get("steps", []),
             "static_performance": static_performance,
             "quantization": quantization,
+            "verification": verification,
+            "cache": compile_metrics.get("cache", {}) if isinstance(compile_metrics, dict) else {},
             "warnings": warnings,
             "warning_count": len(warnings),
             "advice_artifact_count": advice_artifact_count,
@@ -941,9 +1046,7 @@ class RunService:
             if hasattr(self._docker, "logs_demux")
             else self._docker.logs(container)
         )
-        with log_path.open("wb") as handle, stream_path.open(
-            "w", encoding="utf-8"
-        ) as stream:
+        with log_path.open("wb") as handle, stream_path.open("w", encoding="utf-8") as stream:
             for entry in log_iterator:
                 chunks: list[tuple[str, bytes]]
                 if isinstance(entry, tuple) and len(entry) == 2:
@@ -981,9 +1084,7 @@ class RunService:
                     stream.flush()
                     pending[stream_name] += data
                     while b"\n" in pending[stream_name]:
-                        line, pending[stream_name] = pending[stream_name].split(
-                            b"\n", 1
-                        )
+                        line, pending[stream_name] = pending[stream_name].split(b"\n", 1)
                         self._apply_event_stage(run_id, attempt, line)
                 if written >= self._settings.max_log_bytes:
                     break
@@ -1001,9 +1102,7 @@ class RunService:
         except (UnicodeDecodeError, json.JSONDecodeError):
             return
         if event.get("type") == "step_started" and event.get("step") in STEP_STATUS:
-            self._repository.set_stage(
-                run_id, attempt, STEP_STATUS[str(event["step"])]
-            )
+            self._repository.set_stage(run_id, attempt, STEP_STATUS[str(event["step"])])
 
     def _collect_result(self, run_id: str, attempt: int) -> dict[str, Any]:
         attempt_root = self._attempt_root(run_id, attempt)
@@ -1016,9 +1115,7 @@ class RunService:
             raise RuntimeError("Runner result identity does not match the database attempt")
         manifest = self._load_artifact_manifest(run_id, attempt, result)
         for artifact in manifest["artifacts"]:
-            path = _resolve_within(
-                attempt_root, artifact["relative_path"], must_exist=True
-            )
+            path = _resolve_within(attempt_root, artifact["relative_path"], must_exist=True)
             if not path.is_file() or path.is_symlink():
                 raise RuntimeError("artifact must be a regular non-symlink file")
             if path.stat().st_size != artifact["size_bytes"]:

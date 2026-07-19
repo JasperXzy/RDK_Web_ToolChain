@@ -34,12 +34,8 @@ def test_m2_migration_preserves_existing_m0_runs(tmp_path: Path) -> None:
 
     tables = set(inspect(engine).get_table_names())
     columns = {item["name"] for item in inspect(engine).get_columns("conversion_runs")}
-    model_columns = {
-        item["name"] for item in inspect(engine).get_columns("model_versions")
-    }
-    attempt_columns = {
-        item["name"] for item in inspect(engine).get_columns("run_attempts")
-    }
+    model_columns = {item["name"] for item in inspect(engine).get_columns("model_versions")}
+    attempt_columns = {item["name"] for item in inspect(engine).get_columns("run_attempts")}
     calibration_sample_columns = {
         item["name"] for item in inspect(engine).get_columns("calibration_samples")
     }
@@ -70,6 +66,9 @@ def test_m2_migration_preserves_existing_m0_runs(tmp_path: Path) -> None:
         "contract_version",
         "app_version",
         "generated_yaml",
+        "runner_mode",
+        "cache_key",
+        "cache_hit",
     }.issubset(columns)
     assert {"inspection_run_id", "inspected_at"}.issubset(model_columns)
     assert {"stage", "cancel_requested_at", "recovered"}.issubset(attempt_columns)

@@ -22,9 +22,7 @@ pytestmark = [
     ),
 ]
 
-EXPECTED_RESNET18_SHA256 = (
-    "4e8f8653e7a2222b3904cc3fe8e304cd8b339ce1d05fd24688162f86fb6df52c"
-)
+EXPECTED_RESNET18_SHA256 = "4e8f8653e7a2222b3904cc3fe8e304cd8b339ce1d05fd24688162f86fb6df52c"
 TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}
 
 
@@ -57,9 +55,7 @@ request = urllib.request.Request(
 )
 print(urllib.request.urlopen(request, timeout=180).read().decode())
 """
-    exit_code, output = container.exec_run(
-        ["python", "-c", script, method, path, encoded]
-    )
+    exit_code, output = container.exec_run(["python", "-c", script, method, path, encoded])
     if exit_code != 0:
         raise RuntimeError(output.decode(errors="replace"))
     return json.loads(output)
@@ -97,9 +93,7 @@ request = urllib.request.Request(
 )
 print(urllib.request.urlopen(request, timeout=300).read().decode())
 """
-    exit_code, output = container.exec_run(
-        ["python", "-c", script, path, container_file, filename]
-    )
+    exit_code, output = container.exec_run(["python", "-c", script, path, container_file, filename])
     if exit_code != 0:
         raise RuntimeError(output.decode(errors="replace"))
     result = json.loads(output)
@@ -212,19 +206,18 @@ def _conversion_payload(
         "optimize_level": "O0" if s600 else "O2",
         "sample_limit": 20,
         "jobs": 4,
+        "cache_mode": "enable",
+        "verification": {"mode": "basic", "compare_digits": 5},
+        "runner_mode": "cpu",
     }
 
 
 def test_controller_real_resnet18_s100_s600_release_gate(tmp_path: Path) -> None:
     model_path = Path(os.environ["RDKWT_RESNET18_ONNX"]).resolve(strict=True)
-    calibration_dir = Path(os.environ["RDKWT_IMAGENET_CALIBRATION_DIR"]).resolve(
-        strict=True
-    )
+    calibration_dir = Path(os.environ["RDKWT_IMAGENET_CALIBRATION_DIR"]).resolve(strict=True)
     assert model_path.is_file()
     model_sha256 = hashlib.sha256(model_path.read_bytes()).hexdigest()
-    expected_sha256 = os.environ.get(
-        "RDKWT_RESNET18_SHA256", EXPECTED_RESNET18_SHA256
-    )
+    expected_sha256 = os.environ.get("RDKWT_RESNET18_SHA256", EXPECTED_RESNET18_SHA256)
     assert model_sha256 == expected_sha256
     staged_model = tmp_path / "resnet18.onnx"
     shutil.copyfile(model_path, staged_model)
@@ -236,9 +229,7 @@ def test_controller_real_resnet18_s100_s600_release_gate(tmp_path: Path) -> None
     ][:20]
     assert len(images) == 20
     calibration_archive = tmp_path / "imagenet-release.zip"
-    with zipfile.ZipFile(
-        calibration_archive, "w", compression=zipfile.ZIP_DEFLATED
-    ) as archive:
+    with zipfile.ZipFile(calibration_archive, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for index, image in enumerate(images):
             archive.write(image, f"imagenet/{index:04d}-{image.name}")
     calibration_archive.chmod(0o644)
@@ -248,6 +239,7 @@ def test_controller_real_resnet18_s100_s600_release_gate(tmp_path: Path) -> None
     state_name = f"rdkwt-release-state-{suffix}"
     assets_name = f"rdkwt-release-assets-{suffix}"
     runs_name = f"rdkwt-release-runs-{suffix}"
+    cache_name = f"rdkwt-release-cache-{suffix}"
     controller_name = f"rdkwt-controller-release-{suffix}"
     controller_image = os.environ.get(
         "RDKWT_CONTROLLER_IMAGE", "rdk-webtoolchain/controller:0.1-dev"
@@ -259,6 +251,7 @@ def test_controller_real_resnet18_s100_s600_release_gate(tmp_path: Path) -> None
         client.volumes.create(name=state_name),
         client.volumes.create(name=assets_name),
         client.volumes.create(name=runs_name),
+        client.volumes.create(name=cache_name),
     ]
     controller = None
     run_ids: list[str] = []
@@ -279,9 +272,11 @@ def test_controller_real_resnet18_s100_s600_release_gate(tmp_path: Path) -> None
                 "RDKWT_STATE_DIR": "/state",
                 "RDKWT_ASSETS_DIR": "/assets",
                 "RDKWT_RUNS_DIR": "/runs",
+                "RDKWT_CACHE_DIR": "/cache",
                 "RDKWT_PROFILE_DIR": "/app/profiles/targets",
                 "RDKWT_ASSETS_VOLUME": assets_name,
                 "RDKWT_RUNS_VOLUME": runs_name,
+                "RDKWT_CACHE_VOLUME": cache_name,
                 "RDKWT_CPU_RUNNER_IMAGE": runner_image,
                 "RDKWT_DEFAULT_TIMEOUT_SECONDS": "1200",
                 "RDKWT_MAX_UPLOAD_BYTES": str(256 * 1024 * 1024),
@@ -295,6 +290,7 @@ def test_controller_real_resnet18_s100_s600_release_gate(tmp_path: Path) -> None
                 state_name: {"bind": "/state", "mode": "rw"},
                 assets_name: {"bind": "/assets", "mode": "rw"},
                 runs_name: {"bind": "/runs", "mode": "rw"},
+                cache_name: {"bind": "/cache", "mode": "rw"},
                 str(staged_model): {"bind": "/fixtures/resnet18.onnx", "mode": "ro"},
                 str(calibration_archive): {
                     "bind": "/fixtures/imagenet.zip",
@@ -310,7 +306,7 @@ def test_controller_real_resnet18_s100_s600_release_gate(tmp_path: Path) -> None
             controller,
             "/api/v1/projects",
             method="POST",
-            payload={"name": "M2.1 release gate", "description": "real ResNet18"},
+            payload={"name": "M3 release gate", "description": "real ResNet18"},
         )
         assert isinstance(project, dict)
         model = _container_http_file(
@@ -330,9 +326,7 @@ def test_controller_real_resnet18_s100_s600_release_gate(tmp_path: Path) -> None
         inspection_run_id = str(inspection["run_id"])
         run_ids.append(inspection_run_id)
         _wait_for_run(controller, inspection_run_id, timeout_seconds=180)
-        inspected_model = _container_http_json(
-            controller, f"/api/v1/model-versions/{model['id']}"
-        )
+        inspected_model = _container_http_json(controller, f"/api/v1/model-versions/{model['id']}")
         assert inspected_model["compatibility_status"] == "READY"  # type: ignore[index]
         assert inspected_model["inspection"]["inputs"][0]["shape"] == [  # type: ignore[index]
             "N",
@@ -405,6 +399,10 @@ def test_controller_real_resnet18_s100_s600_release_gate(tmp_path: Path) -> None
             summary = detail["summary"]
             assert summary["static_performance"]["march"] == expected_march  # type: ignore[index]
             assert summary["static_performance"]["core_num"] == expected_cores  # type: ignore[index]
+            assert summary["quantization"]["output_cosines"]  # type: ignore[index]
+            assert summary["verification"]["enabled"] is True  # type: ignore[index]
+            assert summary["verification"]["hbruntime"]["outputs"]  # type: ignore[index]
+            assert summary["verification"]["hb_verifier"]["cosines"]  # type: ignore[index]
             hbm = summary["hbm"]  # type: ignore[index]
             assert hbm["size_bytes"] > 1_000_000
             hbm_index = detail["artifacts"].index(hbm)  # type: ignore[union-attr]
@@ -430,11 +428,33 @@ def test_controller_real_resnet18_s100_s600_release_gate(tmp_path: Path) -> None
             }.issubset(set(exported["names"]))
             assert exported["version_manifest"]["target_profile_id"] == profile_id  # type: ignore[index]
 
+        cached_payload = _conversion_payload(
+            profile_id="s100-oe-3.7.0",
+            model_version_id=str(model["id"]),
+            calibration_version_id=calibration_version_id,
+        )
+        cached_submission = _container_http_json(
+            controller,
+            "/api/v1/conversion-runs",
+            method="POST",
+            payload=cached_payload,
+        )
+        assert isinstance(cached_submission, dict)
+        cached_run_id = str(cached_submission["run_id"])
+        run_ids.append(cached_run_id)
+        cached_detail = _wait_for_run(controller, cached_run_id, timeout_seconds=1200)
+        assert cached_detail["cache"]["hit"] is True  # type: ignore[index]
+        assert cached_detail["summary"]["cache"]["warm_before"] is True  # type: ignore[index]
+        assert cached_detail["summary"]["cache"]["file_count_after"] > 0  # type: ignore[index]
+
         for run_id in run_ids:
-            assert client.containers.list(
-                all=True,
-                filters={"label": f"io.drobotics.rdkwt.run_id={run_id}"},
-            ) == []
+            assert (
+                client.containers.list(
+                    all=True,
+                    filters={"label": f"io.drobotics.rdkwt.run_id={run_id}"},
+                )
+                == []
+            )
     finally:
         for run_id in run_ids:
             for leftover in client.containers.list(

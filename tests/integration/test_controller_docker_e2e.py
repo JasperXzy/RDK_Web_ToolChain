@@ -69,6 +69,7 @@ def test_controller_creates_collects_and_cleans_restricted_runner() -> None:
     state_name = f"rdkwt-e2e-state-{suffix}"
     assets_name = f"rdkwt-e2e-assets-{suffix}"
     runs_name = f"rdkwt-e2e-runs-{suffix}"
+    cache_name = f"rdkwt-e2e-cache-{suffix}"
     controller_name = f"rdkwt-controller-e2e-{suffix}"
     controller_image = os.environ.get(
         "RDKWT_CONTROLLER_IMAGE", "rdk-webtoolchain/controller:0.1-dev"
@@ -80,6 +81,7 @@ def test_controller_creates_collects_and_cleans_restricted_runner() -> None:
         client.volumes.create(name=state_name),
         client.volumes.create(name=assets_name),
         client.volumes.create(name=runs_name),
+        client.volumes.create(name=cache_name),
     ]
     controller = None
     run_id = None
@@ -114,9 +116,11 @@ def test_controller_creates_collects_and_cleans_restricted_runner() -> None:
                 "RDKWT_STATE_DIR": "/state",
                 "RDKWT_ASSETS_DIR": "/assets",
                 "RDKWT_RUNS_DIR": "/runs",
+                "RDKWT_CACHE_DIR": "/cache",
                 "RDKWT_PROFILE_DIR": "/app/profiles/targets",
                 "RDKWT_ASSETS_VOLUME": assets_name,
                 "RDKWT_RUNS_VOLUME": runs_name,
+                "RDKWT_CACHE_VOLUME": cache_name,
                 "RDKWT_CPU_RUNNER_IMAGE": runner_image,
             },
             volumes={
@@ -124,6 +128,7 @@ def test_controller_creates_collects_and_cleans_restricted_runner() -> None:
                 state_name: {"bind": "/state", "mode": "rw"},
                 assets_name: {"bind": "/assets", "mode": "rw"},
                 runs_name: {"bind": "/runs", "mode": "rw"},
+                cache_name: {"bind": "/cache", "mode": "rw"},
             },
         )
         _wait_for_controller(controller)

@@ -15,16 +15,23 @@ services:
       - rdkwt-state:/state
       - rdkwt-assets:/assets
       - rdkwt-runs:/runs
+      - rdkwt-cache:/cache
     environment:
       RDKWT_BIND_HOST: "0.0.0.0"
       RDKWT_PORT: "8080"
       RDKWT_STATE_DIR: /state
       RDKWT_ASSETS_DIR: /assets
       RDKWT_RUNS_DIR: /runs
+      RDKWT_CACHE_DIR: /cache
       RDKWT_PROFILE_DIR: /app/profiles/targets
       RDKWT_ASSETS_VOLUME: rdkwt-assets
       RDKWT_RUNS_VOLUME: rdkwt-runs
+      RDKWT_CACHE_VOLUME: rdkwt-cache
       RDKWT_CPU_RUNNER_IMAGE: "${RDKWT_CPU_RUNNER_IMAGE:-rdk-webtoolchain/oe-runner-cpu:oe3.7.0-app0.1}"
+      RDKWT_GPU_ENABLED: "${RDKWT_GPU_ENABLED:-false}"
+      RDKWT_GPU_RUNNER_IMAGE: "${RDKWT_GPU_RUNNER_IMAGE:-}"
+      RDKWT_GPU_DEVICE_IDS: "${RDKWT_GPU_DEVICE_IDS:-all}"
+      RDKWT_GPU_SHM_SIZE: "${RDKWT_GPU_SHM_SIZE:-15g}"
       RDKWT_ALEMBIC_CONFIG: /app/services/controller/alembic.ini
       RDKWT_DEFAULT_TIMEOUT_SECONDS: "${RDKWT_DEFAULT_TIMEOUT_SECONDS:-14400}"
       RDKWT_MAX_LOG_BYTES: "${RDKWT_MAX_LOG_BYTES:-104857600}"
@@ -42,3 +49,5 @@ volumes:
     name: rdkwt-assets
   rdkwt-runs:
     name: rdkwt-runs
+  rdkwt-cache:
+    name: rdkwt-cache

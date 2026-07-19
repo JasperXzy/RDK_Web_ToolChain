@@ -48,9 +48,7 @@ class Project(Base):
 
 class Asset(Base):
     __tablename__ = "assets"
-    __table_args__ = (
-        UniqueConstraint("kind", "sha256", "size_bytes", name="uq_asset_content"),
-    )
+    __table_args__ = (UniqueConstraint("kind", "sha256", "size_bytes", name="uq_asset_content"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
@@ -157,9 +155,7 @@ class CalibrationVersion(Base):
 class CalibrationSample(Base):
     __tablename__ = "calibration_samples"
     __table_args__ = (
-        UniqueConstraint(
-            "calibration_version_id", "ordinal", name="uq_calibration_sample_ordinal"
-        ),
+        UniqueConstraint("calibration_version_id", "ordinal", name="uq_calibration_sample_ordinal"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -191,17 +187,16 @@ class ConversionRun(Base):
     calibration_version_id: Mapped[str | None] = mapped_column(
         ForeignKey("calibration_versions.id", ondelete="SET NULL"), index=True
     )
-    kind: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="CONVERSION", index=True
-    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="CONVERSION", index=True)
     profile_id: Mapped[str] = mapped_column(String(128), nullable=False)
     profile_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     runner_image_reference: Mapped[str | None] = mapped_column(String(512))
     runner_image_id: Mapped[str | None] = mapped_column(String(128))
+    runner_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="cpu")
+    cache_key: Mapped[str | None] = mapped_column(String(64), index=True)
+    cache_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     contract_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1.0")
-    app_version: Mapped[str] = mapped_column(
-        String(64), nullable=False, default="0.1.0.dev0"
-    )
+    app_version: Mapped[str] = mapped_column(String(64), nullable=False, default="0.1.0.dev0")
     generated_yaml: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     request_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)

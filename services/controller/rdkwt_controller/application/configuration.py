@@ -15,10 +15,10 @@ from rdkwt_controller.profiles import TargetProfile
 def _positive_shape(value: Any) -> list[int]:
     if (
         not isinstance(value, list)
-        or len(value) != 4
+        or not 1 <= len(value) <= 4
         or any(isinstance(item, bool) or not isinstance(item, int) or item < 1 for item in value)
     ):
-        raise ValueError("target_shape must contain four positive integers")
+        raise ValueError("target_shape must contain one to four positive integers")
     return value
 
 
@@ -35,60 +35,120 @@ def normalize_configuration(
     profile: TargetProfile,
     inspection: dict[str, Any],
     output_prefix: str,
-    input_options: dict[str, Any] | None,
+    input_options: dict[str, Any] | list[dict[str, Any]] | None,
     calibration_options: dict[str, Any] | None,
     compiler_options: dict[str, Any],
     sample_count: int,
     calibration_source_type: str = "images",
     calibration_validation_report: dict[str, Any] | None = None,
+    verification_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if inspection.get("compatibility_status") != "READY":
         raise ValueError("model inspection contains blocking compatibility errors")
     inspected_inputs = inspection.get("inputs")
-    if not isinstance(inspected_inputs, list) or len(inspected_inputs) != 1:
-        raise ValueError("M2 conversion requires exactly one inspected model input")
-    inspected = inspected_inputs[0]
-    inspected_shape = inspected.get("shape")
-    if not isinstance(inspected_shape, list) or len(inspected_shape) != 4:
-        raise ValueError("inspected model input must have rank four")
+    if not isinstance(inspected_inputs, list) or not 1 <= len(inspected_inputs) <= 4:
+        raise ValueError("M3 conversion requires one to four inspected model inputs")
 
-    supplied_input = input_options or {}
-    target_shape_raw = supplied_input.get("target_shape")
-    if target_shape_raw is None:
-        if any(not isinstance(item, int) or isinstance(item, bool) for item in inspected_shape):
-            raise ValueError("dynamic model input requires an explicit target_shape")
-        target_shape_raw = inspected_shape
-    target_shape = _positive_shape(target_shape_raw)
-    for index, inspected_dimension in enumerate(inspected_shape):
-        if isinstance(inspected_dimension, int) and inspected_dimension != target_shape[index]:
-            raise ValueError(
-                f"target_shape[{index}] must remain {inspected_dimension} "
-                "for the static model input"
-            )
+    if input_options is None:
+        supplied_inputs: list[dict[str, Any]] = []
+    elif isinstance(input_options, dict):
+        supplied_inputs = [input_options]
+    elif isinstance(input_options, list) and all(isinstance(item, dict) for item in input_options):
+        supplied_inputs = input_options
+    else:
+        raise ValueError("input configuration must be an object or a list of objects")
+    if supplied_inputs and len(supplied_inputs) != len(inspected_inputs):
+        raise ValueError("input configuration count must match the inspected ONNX graph")
+    supplied_by_name: dict[str, dict[str, Any]] = {}
+    for index, supplied in enumerate(supplied_inputs):
+        inspected_name = str(inspected_inputs[index].get("name") or "")
+        name = str(supplied.get("name") or inspected_name)
+        if name in supplied_by_name:
+            raise ValueError("input configuration names must be unique")
+        supplied_by_name[name] = supplied
+    if supplied_inputs and set(supplied_by_name) != {
+        str(item.get("name") or "") for item in inspected_inputs
+    }:
+        raise ValueError("input names must match the inspected ONNX graph")
 
-    input_name = str(supplied_input.get("name") or inspected.get("name") or "")
-    if input_name != inspected.get("name"):
-        raise ValueError("input name must match the inspected ONNX graph")
-    train_layout = str(supplied_input.get("train_layout") or "NCHW")
-    train_type = str(supplied_input.get("train_type") or "rgb")
-    runtime_type = str(supplied_input.get("runtime_type") or "nv12")
-    channels = target_shape[1] if train_layout == "NCHW" else target_shape[3]
-    default_mean = [123.675, 116.28, 103.53] if channels == 3 else [0.0]
-    default_scale = [0.01712475, 0.017507, 0.01742919] if channels == 3 else [1.0]
-    normalization_options = supplied_input.get("normalization") or {}
-    if not isinstance(normalization_options, dict):
-        raise ValueError("input normalization must be an object")
-    normalization = {
-        "mean": _number_list(
-            normalization_options.get("mean", default_mean), "normalization.mean"
-        ),
-        "scale": _number_list(
-            normalization_options.get("scale", default_scale), "normalization.scale"
-        ),
-        "std": _number_list(
-            normalization_options.get("std", []), "normalization.std"
-        ),
-    }
+    normalized_inputs: list[dict[str, Any]] = []
+    for inspected in inspected_inputs:
+        input_name = str(inspected.get("name") or "")
+        if not input_name:
+            raise ValueError("inspected model input name is missing")
+        inspected_shape = inspected.get("shape")
+        if not isinstance(inspected_shape, list) or not 1 <= len(inspected_shape) <= 4:
+            raise ValueError(f"inspected input {input_name} must have rank one to four")
+        supplied_input = supplied_by_name.get(input_name, {})
+        target_shape_raw = supplied_input.get("target_shape")
+        if target_shape_raw is None:
+            if any(not isinstance(item, int) or isinstance(item, bool) for item in inspected_shape):
+                raise ValueError(
+                    f"dynamic model input {input_name} requires an explicit target_shape"
+                )
+            target_shape_raw = inspected_shape
+        target_shape = _positive_shape(target_shape_raw)
+        if len(target_shape) != len(inspected_shape):
+            raise ValueError(f"target_shape rank must match inspected input {input_name}")
+        for index, inspected_dimension in enumerate(inspected_shape):
+            if (
+                isinstance(inspected_dimension, int)
+                and not isinstance(inspected_dimension, bool)
+                and inspected_dimension != target_shape[index]
+            ):
+                raise ValueError(
+                    f"{input_name}.target_shape[{index}] must remain "
+                    f"{inspected_dimension} for the static model dimension"
+                )
+
+        train_layout = str(supplied_input.get("train_layout") or "NCHW")
+        rank_four = len(target_shape) == 4
+        channels = (
+            (target_shape[1] if train_layout == "NCHW" else target_shape[3]) if rank_four else None
+        )
+        default_train_type = "gray" if channels == 1 else "rgb" if channels == 3 else "featuremap"
+        train_type = str(supplied_input.get("train_type") or default_train_type)
+        default_runtime_type = (
+            "nv12"
+            if rank_four
+            and channels == 3
+            and (target_shape[2] if train_layout == "NCHW" else target_shape[1]) % 2 == 0
+            and (target_shape[3] if train_layout == "NCHW" else target_shape[2]) % 2 == 0
+            else "featuremap"
+        )
+        runtime_type = str(supplied_input.get("runtime_type") or default_runtime_type)
+        if train_type == "featuremap":
+            default_mean: list[float] = []
+            default_scale: list[float] = []
+        else:
+            default_mean = [123.675, 116.28, 103.53] if channels == 3 else [0.0]
+            default_scale = [0.01712475, 0.017507, 0.01742919] if channels == 3 else [1.0]
+        normalization_options = supplied_input.get("normalization") or {}
+        if not isinstance(normalization_options, dict):
+            raise ValueError(f"input {input_name} normalization must be an object")
+        normalized_inputs.append(
+            {
+                "name": input_name,
+                "target_shape": target_shape,
+                "train_type": train_type,
+                "train_layout": train_layout,
+                "runtime_type": runtime_type,
+                "normalization": {
+                    "mean": _number_list(
+                        normalization_options.get("mean", default_mean),
+                        f"{input_name}.normalization.mean",
+                    ),
+                    "scale": _number_list(
+                        normalization_options.get("scale", default_scale),
+                        f"{input_name}.normalization.scale",
+                    ),
+                    "std": _number_list(
+                        normalization_options.get("std", []),
+                        f"{input_name}.normalization.std",
+                    ),
+                },
+            }
+        )
 
     supplied_calibration = calibration_options or {}
     if not isinstance(supplied_calibration, dict):
@@ -100,9 +160,19 @@ def normalize_configuration(
         raise ValueError("calibration sample_limit must be an integer")
     if sample_limit > sample_count:
         raise ValueError("calibration sample_limit exceeds the finalized sample count")
-    height = target_shape[2] if train_layout == "NCHW" else target_shape[1]
-    width = target_shape[3] if train_layout == "NCHW" else target_shape[2]
     if calibration_source_type == "images":
+        if len(normalized_inputs) != 1:
+            raise ValueError("image calibration supports exactly one model input")
+        selected_input = normalized_inputs[0]
+        if selected_input["train_type"] not in {"rgb", "bgr", "gray"}:
+            raise ValueError("image calibration requires rgb, bgr, or gray train_type")
+        target_shape = selected_input["target_shape"]
+        if len(target_shape) != 4:
+            raise ValueError("image calibration requires a rank-four model input")
+        train_layout = selected_input["train_layout"]
+        channels = target_shape[1] if train_layout == "NCHW" else target_shape[3]
+        height = target_shape[2] if train_layout == "NCHW" else target_shape[1]
+        width = target_shape[3] if train_layout == "NCHW" else target_shape[2]
         recipe_options = supplied_calibration.get("recipe") or {}
         if not isinstance(recipe_options, dict):
             raise ValueError("calibration recipe must be an object")
@@ -117,11 +187,13 @@ def normalize_configuration(
             "std": _number_list(recipe_options.get("std", recipe_std), "recipe.std"),
         }
     elif calibration_source_type == "npy":
+        if len(normalized_inputs) != 1:
+            raise ValueError("direct NPY calibration supports exactly one model input")
         if supplied_calibration.get("recipe") is not None:
             raise ValueError("direct NPY calibration must not include an image recipe")
         report = calibration_validation_report or {}
         npy_shape = report.get("shape")
-        expected_shape = target_shape[1:]
+        expected_shape = normalized_inputs[0]["target_shape"][1:]
         if npy_shape != expected_shape:
             raise ValueError(
                 f"NPY sample Shape {npy_shape} must match the batch-free model input "
@@ -130,8 +202,35 @@ def normalize_configuration(
         if not isinstance(report.get("dtype"), str):
             raise ValueError("NPY calibration validation report is incomplete")
         recipe = None
+    elif calibration_source_type == "npy_multi":
+        if len(normalized_inputs) < 2:
+            raise ValueError("multi-input NPY calibration requires at least two inputs")
+        if supplied_calibration.get("recipe") is not None:
+            raise ValueError("multi-input NPY calibration must not include an image recipe")
+        report = calibration_validation_report or {}
+        report_inputs = report.get("inputs")
+        if not isinstance(report_inputs, list) or not all(
+            isinstance(item, dict) for item in report_inputs
+        ):
+            raise ValueError("multi-input calibration validation report is incomplete")
+        report_by_name = {str(item.get("name")): item for item in report_inputs}
+        if set(report_by_name) != {item["name"] for item in normalized_inputs}:
+            raise ValueError("multi-input calibration directories must match model input names")
+        for input_config in normalized_inputs:
+            input_report = report_by_name[input_config["name"]]
+            expected_shape = input_config["target_shape"][1:]
+            if input_report.get("shape") != expected_shape:
+                raise ValueError(
+                    f"NPY samples for {input_config['name']} have Shape "
+                    f"{input_report.get('shape')}; expected {expected_shape}"
+                )
+            if not isinstance(input_report.get("dtype"), str):
+                raise ValueError(
+                    f"NPY validation metadata is incomplete for {input_config['name']}"
+                )
+        recipe = None
     else:
-        raise ValueError("calibration source_type must be images or npy")
+        raise ValueError("calibration source_type must be images, npy, or npy_multi")
 
     core_num = compiler_options.get("core_num")
     if core_num is None:
@@ -139,23 +238,12 @@ def normalize_configuration(
     max_l2m_size = compiler_options.get("max_l2m_size")
     if max_l2m_size is None:
         max_l2m_size = profile.capabilities.max_l2m_size.default
-    profile.validate_compile_options(
-        core_num=core_num, max_l2m_size=max_l2m_size
-    )
+    profile.validate_compile_options(core_num=core_num, max_l2m_size=max_l2m_size)
     configuration = {
         "schema_version": "1",
         "target_profile": profile.snapshot(),
         "output_prefix": output_prefix,
-        "inputs": [
-            {
-                "name": input_name,
-                "target_shape": target_shape,
-                "train_type": train_type,
-                "train_layout": train_layout,
-                "runtime_type": runtime_type,
-                "normalization": normalization,
-            }
-        ],
+        "inputs": normalized_inputs,
         "calibration": {
             "source_type": calibration_source_type,
             "algorithm": str(supplied_calibration.get("algorithm") or "default"),
@@ -171,6 +259,11 @@ def normalize_configuration(
             "max_time_per_fc": int(compiler_options.get("max_time_per_fc") or 0),
             "jobs": int(compiler_options.get("jobs") or 8),
             "cache_mode": str(compiler_options.get("cache_mode") or "disable"),
+            "cache_key": compiler_options.get("cache_key"),
+        },
+        "verification": {
+            "mode": str((verification_options or {}).get("mode") or "basic"),
+            "compare_digits": int((verification_options or {}).get("compare_digits") or 5),
         },
     }
     return validate_configuration(configuration)
