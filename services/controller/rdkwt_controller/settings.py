@@ -73,6 +73,10 @@ class Settings:
     max_upload_bytes: int = 2 * 1024 * 1024 * 1024
     min_free_bytes: int = 512 * 1024 * 1024
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost", "[::1]")
+    board_connect_timeout_seconds: int = 10
+    board_command_timeout_seconds: int = 1_800
+    board_max_upload_bytes: int = 2 * 1024 * 1024 * 1024
+    board_keep_remote: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -107,6 +111,14 @@ class Settings:
             max_upload_bytes=_positive_int("RDKWT_MAX_UPLOAD_BYTES", 2 * 1024 * 1024 * 1024),
             min_free_bytes=_positive_int("RDKWT_MIN_FREE_DISK_BYTES", 512 * 1024 * 1024),
             allowed_hosts=_allowed_hosts(),
+            board_connect_timeout_seconds=_positive_int("RDKWT_BOARD_CONNECT_TIMEOUT_SECONDS", 10),
+            board_command_timeout_seconds=_positive_int(
+                "RDKWT_BOARD_COMMAND_TIMEOUT_SECONDS", 1_800
+            ),
+            board_max_upload_bytes=_positive_int(
+                "RDKWT_BOARD_MAX_UPLOAD_BYTES", 2 * 1024 * 1024 * 1024
+            ),
+            board_keep_remote=_boolean("RDKWT_BOARD_KEEP_REMOTE", False),
         )
 
     @property
@@ -137,9 +149,20 @@ class Settings:
             self.assets_dir,
             self.runs_dir,
             self.effective_cache_dir,
+            self.secrets_dir,
+            self.board_runs_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
+        self.secrets_dir.chmod(0o700)
 
     @property
     def effective_cache_dir(self) -> Path:
         return self.cache_dir or self.state_dir.parent / "cache"
+
+    @property
+    def secrets_dir(self) -> Path:
+        return self.state_dir / "secrets"
+
+    @property
+    def board_runs_dir(self) -> Path:
+        return self.runs_dir / "board-runs"

@@ -56,6 +56,7 @@ def test_m2_migration_preserves_existing_m0_runs(tmp_path: Path) -> None:
         "calibration_versions",
         "calibration_samples",
     }.issubset(tables)
+    assert {"devices", "board_runs"}.issubset(tables)
     assert {
         "project_id",
         "model_version_id",
@@ -73,4 +74,10 @@ def test_m2_migration_preserves_existing_m0_runs(tmp_path: Path) -> None:
     assert {"inspection_run_id", "inspected_at"}.issubset(model_columns)
     assert {"stage", "cancel_requested_at", "recovered"}.issubset(attempt_columns)
     assert "validation" in calibration_sample_columns
+    device_columns = {item["name"] for item in inspect(engine).get_columns("devices")}
+    board_run_columns = {item["name"] for item in inspect(engine).get_columns("board_runs")}
+    assert {"credential_ref", "host_key_fingerprint", "probe_result"}.issubset(device_columns)
+    assert {"device_snapshot", "options", "hbm_sha256", "result_payload"}.issubset(
+        board_run_columns
+    )
     assert preserved == "SUCCEEDED"

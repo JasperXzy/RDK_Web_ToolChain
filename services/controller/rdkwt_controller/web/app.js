@@ -3,6 +3,7 @@
 const ACTIVE_STATUSES = new Set([
   "QUEUED", "PROVISIONING", "RUNNING", "INSPECTING", "CHECKING",
   "PREPROCESSING", "COMPILING", "VERIFYING", "COLLECTING", "CANCELLING",
+  "CONNECTING", "UPLOADING", "CLEANING",
 ]);
 const RETRYABLE_STATUSES = new Set(["FAILED", "CANCELLED", "INTERRUPTED"]);
 const TERMINAL_STATUSES = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
@@ -24,6 +25,11 @@ const state = {
   logsPaused: false,
   smokeStarted: false,
   pollBusy: false,
+  devices: [],
+  boardRuns: [],
+  currentBoardRun: null,
+  boardEventSource: null,
+  boardUploadLimit: 0,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -50,7 +56,11 @@ async function api(path, options = {}) {
   const response = await fetch(path, {...options, headers, credentials: "same-origin"});
   const contentType = response.headers.get("content-type") || "";
   const payload = contentType.includes("json") ? await response.json() : await response.text();
-  if (!response.ok) throw new Error(payload.detail || payload.message || `请求失败（${response.status}）`);
+  if (!response.ok) {
+    const error = new Error(payload.detail || payload.message || `请求失败（${response.status}）`);
+    if (payload && typeof payload === "object") Object.assign(error, payload);
+    throw error;
+  }
   return payload;
 }
 
@@ -99,7 +109,7 @@ function formatDuration(milliseconds) {
 
 function statusClass(status) {
   if (status === "SUCCEEDED" || status === "READY" || status === "PASS") return "good";
-  if (["FAILED", "INTERRUPTED", "BLOCKED"].includes(status)) return "bad";
+  if (["FAILED", "INTERRUPTED", "BLOCKED", "ERROR"].includes(status)) return "bad";
   if (ACTIVE_STATUSES.has(status)) return "active";
   return "neutral";
 }
@@ -421,6 +431,7 @@ function showView(view) {
   state.currentView = view;
   $("#workspace-view").classList.toggle("hidden", view !== "workspace");
   $("#runs-view").classList.toggle("hidden", view !== "runs");
+  $("#devices-view").classList.toggle("hidden", view !== "devices");
   $$(".topnav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
 }
 
@@ -1310,16 +1321,320 @@ function applyLogSearch() {
   });
 }
 
+function deviceById(deviceId) {
+  return state.devices.find((device) => device.id === deviceId) || null;
+}
+
+async function loadBoardData() {
+  [state.devices, state.boardRuns] = await Promise.all([
+    api("/api/v1/devices"),
+    api("/api/v1/board-runs"),
+  ]);
+  renderDevices();
+  renderBoardRuns();
+  populateBoardRunForm();
+}
+
+function renderDevices() {
+  $("#devices-total").textContent = state.devices.length;
+  $("#devices-ready").textContent = state.devices.filter((device) => device.status === "READY").length;
+  const root = $("#device-list");
+  root.replaceChildren();
+  if (!state.devices.length) {
+    root.append(el("div", "empty-state", "尚未添加开发板。凭据将保存在本机加密 Secret Store。"));
+    return;
+  }
+  state.devices.forEach((device) => {
+    const card = el("article", "device-card");
+    const heading = el("div", "device-card-heading");
+    const identity = el("div");
+    identity.append(
+      el("span", "eyebrow", device.platform.toUpperCase()),
+      el("h3", "", device.name),
+      el("code", "", `${device.user}@${device.host}:${device.port}`),
+    );
+    heading.append(identity, statusPill(device.status));
+    const facts = el("div", "device-facts");
+    const probe = device.probe || {};
+    const values = [
+      ["Host Key", device.host_key_fingerprint || "等待首次确认"],
+      ["检测平台", device.detected_platform || "—"],
+      ["hrt_model_exec", probe.hrt_model_exec_version || "—"],
+      ["/tmp 可用", probe.disk?.free_bytes ? formatBytes(probe.disk.free_bytes) : "—"],
+    ];
+    values.forEach(([label, value]) => {
+      const item = el("div");
+      item.append(el("span", "", label), el("code", "", value));
+      facts.append(item);
+    });
+    if (device.last_probe_error) card.append(el("p", "device-error", device.last_probe_error));
+    const actions = el("div", "device-actions");
+    const probeButton = el("button", "button ghost small", device.status === "READY" ? "重新探测" : "探测并验证");
+    probeButton.type = "button";
+    probeButton.addEventListener("click", () => probeDevice(device.id));
+    const runButton = el("button", "button secondary small", "板端验证");
+    runButton.type = "button";
+    runButton.disabled = device.status !== "READY";
+    runButton.addEventListener("click", () => openBoardRunCreate(device.id));
+    const deleteButton = el("button", "button danger small", "删除");
+    deleteButton.type = "button";
+    deleteButton.addEventListener("click", () => deleteDevice(device));
+    actions.append(probeButton, runButton, deleteButton);
+    card.append(heading, facts, actions);
+    root.append(card);
+  });
+}
+
+async function probeDevice(deviceId) {
+  try {
+    const device = await api(`/api/v1/devices/${deviceId}/probe`, {method: "POST"});
+    toast(`${device.name} 已通过 SSH / SFTP 与平台探测`);
+    await loadBoardData();
+  } catch (error) {
+    if (error.code === "HOST_KEY_UNTRUSTED" && error.observed_fingerprint) {
+      const accepted = window.confirm(
+        `首次连接观察到 SSH Host Key：\n\n${error.observed_fingerprint}\n\n请通过可信渠道核对。确认保存并重新探测吗？`,
+      );
+      if (accepted) {
+        try {
+          await api(`/api/v1/devices/${deviceId}`, {
+            method: "PATCH",
+            body: JSON.stringify({host_key_fingerprint: error.observed_fingerprint}),
+          });
+          await probeDevice(deviceId);
+          return;
+        } catch (trustError) {
+          toast(trustError.message, true);
+        }
+      }
+    } else {
+      toast(error.message, true);
+    }
+    await loadBoardData().catch(() => {});
+  }
+}
+
+async function deleteDevice(device) {
+  if (!window.confirm(`删除开发板“${device.name}”及其本机加密凭据？历史板端任务会保留。`)) return;
+  try {
+    await api(`/api/v1/devices/${device.id}`, {method: "DELETE"});
+    toast("设备与加密凭据已删除");
+    await loadBoardData();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function populateBoardRunForm(preferredDeviceId = $("#board-device")?.value) {
+  const deviceSelect = $("#board-device");
+  const conversionSelect = $("#board-conversion");
+  if (!deviceSelect || !conversionSelect) return;
+  const selectedDevice = preferredDeviceId || deviceSelect.value;
+  deviceSelect.replaceChildren(new Option("选择已就绪设备", ""));
+  state.devices.filter((device) => device.status === "READY").forEach((device) => {
+    deviceSelect.add(new Option(`${device.name} · ${device.platform.toUpperCase()}`, device.id));
+  });
+  if ([...deviceSelect.options].some((option) => option.value === selectedDevice)) {
+    deviceSelect.value = selectedDevice;
+  }
+  const device = deviceById(deviceSelect.value);
+  const previousRun = conversionSelect.value;
+  conversionSelect.replaceChildren(new Option("选择成功转换", ""));
+  state.runs
+    .filter((run) => run.kind === "CONVERSION" && run.status === "SUCCEEDED")
+    .filter((run) => !device || run.profile_id.startsWith(`${device.platform}-`))
+    .forEach((run) => conversionSelect.add(new Option(
+      `${run.profile_id} · ${run.id.slice(0, 8)} · ${formatDate(run.created_at)}`,
+      run.id,
+    )));
+  if ([...conversionSelect.options].some((option) => option.value === previousRun)) {
+    conversionSelect.value = previousRun;
+  }
+  const coreOne = $("#board-core").querySelector('option[value="2"]');
+  coreOne.disabled = !device || device.platform === "s100";
+  if (coreOne.disabled && $("#board-core").value === "2") $("#board-core").value = "0";
+}
+
+function openBoardRunCreate(deviceId = null) {
+  populateBoardRunForm(deviceId);
+  if (deviceId) $("#board-device").value = deviceId;
+  populateBoardRunForm(deviceId);
+  syncBoardRunFields();
+  if (!state.devices.some((device) => device.status === "READY")) {
+    return toast("请先完成至少一台开发板的探测", true);
+  }
+  if (!state.runs.some((run) => run.kind === "CONVERSION" && run.status === "SUCCEEDED")) {
+    return toast("请先完成至少一个模型转换，生成 HBM", true);
+  }
+  $("#board-run-create-dialog").showModal();
+}
+
+function syncBoardRunFields() {
+  const mode = $("#board-mode").value;
+  $("#board-core-field").classList.toggle("hidden", mode === "model_info");
+  $("#board-input-field").classList.toggle("hidden", mode !== "infer");
+  $("#board-perf-fields").classList.toggle("hidden", mode !== "perf");
+  $("#board-input").required = mode === "infer";
+  const timeMode = $("#board-duration-mode").value === "time";
+  $("#board-frame-field").classList.toggle("hidden", timeMode);
+  $("#board-time-field").classList.toggle("hidden", !timeMode);
+}
+
+function boardModeLabel(mode) {
+  return {model_info: "模型信息", infer: "单次推理", perf: "性能测试"}[mode] || mode;
+}
+
+function renderBoardRuns() {
+  $("#board-runs-total").textContent = state.boardRuns.length;
+  $("#board-runs-active").textContent = state.boardRuns.filter((run) => ACTIVE_STATUSES.has(run.status)).length;
+  const list = $("#board-run-list");
+  list.replaceChildren();
+  if (!state.boardRuns.length) {
+    list.append(el("div", "empty-state", "设备探测成功、且已有 HBM 后即可运行 model_info / infer / perf。"));
+    return;
+  }
+  state.boardRuns.forEach((run) => {
+    const row = el("button", "run-row board-run-row");
+    row.type = "button";
+    const device = deviceById(run.device_id);
+    const identity = el("div", "run-identity");
+    identity.append(
+      el("strong", "", `${boardModeLabel(run.mode)} · ${device?.name || "已删除设备"}`),
+      el("code", "", run.id),
+    );
+    row.append(
+      identity,
+      statusPill(run.status),
+      el("span", "", run.phase),
+      el("span", "", formatDate(run.created_at)),
+      el("span", "run-chevron", "›"),
+    );
+    row.addEventListener("click", () => openBoardRun(run.id));
+    list.append(row);
+  });
+}
+
+function boardMetricLabel(key) {
+  return {
+    latency_ms: "单次延迟", latency_avg_ms: "平均延迟", latency_min_ms: "最低延迟",
+    latency_max_ms: "最高延迟", fps: "实测 FPS", inference_count: "推理次数",
+  }[key] || key.replaceAll("_", " ");
+}
+
+function boardMetricValue(key, value) {
+  if (key.includes("latency") && typeof value === "number") return `${value.toFixed(3)} ms`;
+  if (key === "fps" && typeof value === "number") return value.toFixed(3);
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value ?? "—");
+}
+
+function renderBoardRunDetail(detail) {
+  state.currentBoardRun = detail;
+  $("#board-run-title").textContent = `${boardModeLabel(detail.mode)} · ${detail.id.slice(0, 8)}`;
+  $("#board-run-subtitle").textContent = `${detail.device?.name || "已删除设备"} · ${detail.device?.platform?.toUpperCase() || "—"} · ${detail.phase}`;
+  const root = $("#board-run-detail");
+  root.replaceChildren();
+  const summary = el("div", "summary-cards");
+  const summaryValues = [
+    ["状态", detail.status], ["阶段", detail.phase], ["HBM", formatBytes(detail.hbm_size_bytes)],
+    ["创建时间", formatDate(detail.created_at)],
+  ];
+  summaryValues.forEach(([label, value]) => {
+    const card = el("div", "summary-card");
+    card.append(el("span", "", label), el("strong", "", value));
+    summary.append(card);
+  });
+  root.append(summary);
+  if (detail.error) {
+    const error = el("div", "error-card");
+    error.append(el("h3", "", detail.error.code), el("p", "", detail.error.message));
+    root.append(error);
+  }
+  const metrics = detail.result?.metrics || {};
+  if (detail.mode === "model_info" && Array.isArray(metrics.models)) {
+    const modelCard = el("section", "detail-card board-result-card");
+    modelCard.append(el("h3", "", "HBM 模型结构"));
+    if (!metrics.models.length) modelCard.append(el("p", "empty-state", "工具未返回可解析的模型结构；请查看原始日志。"));
+    metrics.models.forEach((model) => {
+      const item = el("div", "board-model-info");
+      item.append(
+        el("strong", "", model.name || "未命名模型"),
+        el("code", "", `${model.inputs?.length || 0} inputs · ${model.outputs?.length || 0} outputs`),
+      );
+      modelCard.append(item);
+    });
+    root.append(modelCard);
+  } else if (Object.keys(metrics).length) {
+    const cards = el("div", "summary-cards board-metric-cards");
+    Object.entries(metrics).forEach(([key, value]) => {
+      const card = el("div", "summary-card");
+      card.append(el("span", "", boardMetricLabel(key)), el("strong", "", boardMetricValue(key, value)));
+      cards.append(card);
+    });
+    root.append(cards);
+  }
+  const actions = el("section", "detail-card board-result-card");
+  actions.append(el("h3", "", "日志与产物"));
+  const links = el("div", "board-artifact-links");
+  const logLink = el("a", "button ghost small", "原始日志");
+  logLink.href = `/api/v1/board-runs/${detail.id}/logs`;
+  links.append(logLink);
+  (detail.result?.artifacts || []).forEach((artifact, index) => {
+    if (artifact.name === "board.log") return;
+    const link = el("a", "button ghost small", `${artifact.name} · ${formatBytes(artifact.size_bytes)}`);
+    link.href = `/api/v1/board-runs/${detail.id}/artifacts/${index}`;
+    links.append(link);
+  });
+  actions.append(links);
+  root.append(actions);
+  $("#cancel-board-run").classList.toggle("hidden", !ACTIVE_STATUSES.has(detail.status));
+}
+
+function closeBoardEventStream() {
+  state.boardEventSource?.close();
+  state.boardEventSource = null;
+}
+
+async function openBoardRun(runId) {
+  try {
+    const detail = await api(`/api/v1/board-runs/${runId}`);
+    renderBoardRunDetail(detail);
+    if (!$("#board-run-dialog").open) $("#board-run-dialog").showModal();
+    closeBoardEventStream();
+    if (ACTIVE_STATUSES.has(detail.status)) {
+      state.boardEventSource = new EventSource(`/api/v1/board-runs/${runId}/events`);
+      state.boardEventSource.addEventListener("status", async () => {
+        const refreshed = await api(`/api/v1/board-runs/${runId}`);
+        renderBoardRunDetail(refreshed);
+        await loadBoardData();
+      });
+      state.boardEventSource.addEventListener("terminal", async () => {
+        closeBoardEventStream();
+        const refreshed = await api(`/api/v1/board-runs/${runId}`);
+        renderBoardRunDetail(refreshed);
+        await loadBoardData();
+      });
+    }
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
 async function periodicRefresh() {
   if (state.pollBusy) return;
   state.pollBusy = true;
   try {
     await loadRuns();
+    await loadBoardData();
     if (state.currentProject && !$("#model-progress").classList.contains("hidden")) return;
     if (state.currentProject) await selectProject(state.currentProject.id, false);
     const smoke = state.preflight?.details?.runner_smoke_test;
     if (smoke && ACTIVE_STATUSES.has(smoke.status)) await refreshPreflight(false);
     if (state.currentRun?.id && $("#run-dialog").open) await refreshRunDetail();
+    if (state.currentBoardRun?.id && $("#board-run-dialog").open) {
+      const detail = await api(`/api/v1/board-runs/${state.currentBoardRun.id}`);
+      renderBoardRunDetail(detail);
+    }
   } catch (_error) {
     // A transient polling failure is shown on the next explicit user action.
   } finally {
@@ -1447,6 +1762,118 @@ $("#run-filter").addEventListener("change", renderAllRuns);
 $("#run-search").addEventListener("input", renderAllRuns);
 $$(".topnav-item").forEach((button) => button.addEventListener("click", () => showView(button.dataset.view)));
 
+$("#open-device-dialog").addEventListener("click", () => $("#device-dialog").showModal());
+$("#refresh-devices").addEventListener("click", () => loadBoardData().catch((error) => toast(error.message, true)));
+$("#device-auth-type").addEventListener("change", () => {
+  const privateKey = $("#device-auth-type").value === "private_key";
+  $("#device-password-field").classList.toggle("hidden", privateKey);
+  $("#device-private-key-field").classList.toggle("hidden", !privateKey);
+  $("#device-passphrase-field").classList.toggle("hidden", !privateKey);
+  $("#device-password").required = !privateKey;
+  $("#device-private-key").required = privateKey;
+});
+$("#device-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true;
+  const privateKey = $("#device-auth-type").value === "private_key";
+  const credential = privateKey
+    ? {
+      private_key: $("#device-private-key").value,
+      ...($("#device-passphrase").value ? {passphrase: $("#device-passphrase").value} : {}),
+    }
+    : {password: $("#device-password").value};
+  try {
+    const device = await api("/api/v1/devices", {
+      method: "POST",
+      body: JSON.stringify({
+        name: $("#device-name").value,
+        platform: $("#device-platform").value,
+        host: $("#device-host").value,
+        port: Number($("#device-port").value),
+        user: $("#device-user").value,
+        auth_type: $("#device-auth-type").value,
+        credential,
+        host_key_fingerprint: $("#device-fingerprint").value.trim() || null,
+      }),
+    });
+    event.target.reset();
+    $("#device-port").value = "22";
+    $("#device-user").value = "root";
+    $("#device-auth-type").dispatchEvent(new Event("change"));
+    $("#device-dialog").close();
+    await loadBoardData();
+    toast("设备已保存；现在进行 Host Key 与运行时探测");
+    await probeDevice(device.id);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#open-board-run-dialog").addEventListener("click", () => openBoardRunCreate());
+$("#board-device").addEventListener("change", () => populateBoardRunForm($("#board-device").value));
+$("#board-mode").addEventListener("change", syncBoardRunFields);
+$("#board-duration-mode").addEventListener("change", syncBoardRunFields);
+$("#board-run-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.submitter;
+  const mode = $("#board-mode").value;
+  button.disabled = true;
+  try {
+    let run;
+    if (mode === "infer") {
+      const file = $("#board-input").files[0];
+      if (!file) throw new Error("请选择推理输入文件");
+      const query = new URLSearchParams({
+        device_id: $("#board-device").value,
+        conversion_run_id: $("#board-conversion").value,
+        core_id: $("#board-core").value,
+      });
+      run = await uploadBinary(`/api/v1/board-runs/infer?${query}`, file, (ratio) => {
+        setProgress("#board-upload-progress", ratio);
+      });
+    } else {
+      const payload = {
+        device_id: $("#board-device").value,
+        conversion_run_id: $("#board-conversion").value,
+        mode,
+      };
+      if (mode === "perf") {
+        payload.core_id = Number($("#board-core").value);
+        payload.thread_num = Number($("#board-threads").value);
+        if ($("#board-duration-mode").value === "time") {
+          payload.perf_time_minutes = Number($("#board-perf-time").value);
+        } else {
+          payload.frame_count = Number($("#board-frame-count").value);
+        }
+      }
+      run = await api("/api/v1/board-runs", {method: "POST", body: JSON.stringify(payload)});
+    }
+    event.target.reset();
+    $("#board-run-create-dialog").close();
+    await loadBoardData();
+    toast(`板端${boardModeLabel(mode)} ${run.id.slice(0, 8)} 已入队`);
+    await openBoardRun(run.id);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    syncBoardRunFields();
+  }
+});
+$("#cancel-board-run").addEventListener("click", async () => {
+  if (!state.currentBoardRun || !window.confirm("取消当前板端任务并关闭 SSH 通道？")) return;
+  try {
+    await api(`/api/v1/board-runs/${state.currentBoardRun.id}/cancel`, {method: "POST"});
+    toast("板端取消请求已发送");
+    await openBoardRun(state.currentBoardRun.id);
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+
 $("#wizard-model").addEventListener("change", () => {
   updateWizardModel(true);
   updateCalibrationSelection(true);
@@ -1514,20 +1941,26 @@ $("#rerun-smoke").addEventListener("click", () => runSmokeTest(true).catch((erro
 $$("[data-close]").forEach((button) => button.addEventListener("click", () => {
   const dialog = $(`#${button.dataset.close}`);
   if (dialog.id === "run-dialog") closeRunStreams();
+  if (dialog.id === "board-run-dialog") closeBoardEventStream();
   dialog.close();
 }));
 $("#run-dialog").addEventListener("close", closeRunStreams);
+$("#board-run-dialog").addEventListener("close", closeBoardEventStream);
 
 async function initialize() {
   try {
     const session = await api("/api/v1/session");
     state.csrf = session.csrf_token;
+    state.boardUploadLimit = session.board_max_upload_bytes;
     $("#upload-limit").textContent = formatBytes(session.max_upload_bytes);
-    const [profiles, preflight, projects, runs] = await Promise.all([
+    const [profiles, preflight, projects, runs, devices, boardRuns] = await Promise.all([
       api("/api/v1/profiles"), api("/api/v1/system/preflight"), api("/api/v1/projects"), api("/api/v1/runs"),
+      api("/api/v1/devices"), api("/api/v1/board-runs"),
     ]);
     state.profiles = profiles; state.preflight = preflight; state.projects = projects; state.runs = runs;
+    state.devices = devices; state.boardRuns = boardRuns;
     renderProfileCards(); renderPreflight(); renderProjectList(); renderRunSummary(); renderAllRuns(); populateComparisonRuns();
+    renderDevices(); renderBoardRuns(); populateBoardRunForm();
     const queued = runs.filter((run) => run.status === "QUEUED").length;
     const active = runs.filter((run) => ACTIVE_STATUSES.has(run.status) && run.status !== "QUEUED").length;
     $("#queue-status").textContent = `队列 ${queued} · 运行 ${active}`;

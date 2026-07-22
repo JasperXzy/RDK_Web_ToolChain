@@ -10,7 +10,15 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StrictFloat,
+    StrictInt,
+    model_validator,
+)
 
 router = APIRouter()
 TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}
@@ -142,6 +150,86 @@ class RunComparisonRequest(BaseModel):
         return self
 
 
+class DeviceCredentialRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    password: SecretStr | None = Field(default=None, max_length=16_384)
+    private_key: SecretStr | None = Field(default=None, max_length=131_072)
+    passphrase: SecretStr | None = Field(default=None, max_length=16_384)
+
+    def reveal(self) -> dict[str, str]:
+        return {
+            key: value.get_secret_value()
+            for key, value in (
+                ("password", self.password),
+                ("private_key", self.private_key),
+                ("passphrase", self.passphrase),
+            )
+            if value is not None
+        }
+
+
+class DeviceCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    platform: Literal["s100", "s600"]
+    host: str = Field(min_length=1, max_length=255, pattern=r"^[^\s/]+$")
+    port: StrictInt = Field(default=22, ge=1, le=65535)
+    user: str = Field(min_length=1, max_length=128, pattern=r"^[^\s/]+$")
+    auth_type: Literal["password", "private_key"]
+    credential: DeviceCredentialRequest
+    host_key_fingerprint: str | None = Field(default=None, pattern=r"^SHA256:[A-Za-z0-9+/]{43}$")
+
+
+class DeviceUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    platform: Literal["s100", "s600"] | None = None
+    host: str | None = Field(default=None, min_length=1, max_length=255, pattern=r"^[^\s/]+$")
+    port: StrictInt | None = Field(default=None, ge=1, le=65535)
+    user: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[^\s/]+$")
+    auth_type: Literal["password", "private_key"] | None = None
+    credential: DeviceCredentialRequest | None = None
+    host_key_fingerprint: str | None = Field(default=None, pattern=r"^SHA256:[A-Za-z0-9+/]{43}$")
+
+    @model_validator(mode="after")
+    def reject_null_updates(self) -> DeviceUpdateRequest:
+        nullable = {"host_key_fingerprint"}
+        for field in self.model_fields_set - nullable:
+            if getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null")
+        return self
+
+
+class BoardOperationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    conversion_run_id: UUID
+    mode: Literal["model_info", "perf"]
+    core_id: StrictInt | None = Field(default=None, ge=0, le=2)
+    thread_num: StrictInt | None = Field(default=None, ge=1, le=32)
+    frame_count: StrictInt | None = Field(default=None, ge=1, le=1_000_000)
+    perf_time_minutes: StrictInt | None = Field(default=None, ge=1, le=1_440)
+
+    @model_validator(mode="after")
+    def validate_mode_options(self) -> BoardOperationRequest:
+        values = (self.core_id, self.thread_num, self.frame_count, self.perf_time_minutes)
+        if self.mode == "model_info" and any(value is not None for value in values):
+            raise ValueError("model_info does not accept performance options")
+        if self.mode == "perf":
+            if self.core_id is None or self.thread_num is None:
+                raise ValueError("perf requires core_id and thread_num")
+            if (self.frame_count is None) == (self.perf_time_minutes is None):
+                raise ValueError("perf requires exactly one duration option")
+        return self
+
+
+class BoardRunRequest(BoardOperationRequest):
+    device_id: UUID
+
+
 def _services(request: Request) -> object:
     return request.app.state.services
 
@@ -227,6 +315,7 @@ async def browser_session(request: Request, response: Response) -> dict[str, str
     return {
         "csrf_token": request.app.state.csrf_token,
         "max_upload_bytes": request.app.state.settings.max_upload_bytes,
+        "board_max_upload_bytes": request.app.state.settings.board_max_upload_bytes,
     }
 
 
@@ -431,6 +520,179 @@ async def finalize_calibration_version(version_id: str, request: Request) -> dic
 @router.get("/api/v1/runs")
 async def runs(request: Request) -> list[dict[str, object]]:
     return _services(request).repository.list()
+
+
+@router.get("/api/v1/devices")
+async def devices(request: Request) -> list[dict[str, object]]:
+    return _services(request).device_service.list()
+
+
+@router.post("/api/v1/devices", status_code=status.HTTP_201_CREATED)
+async def create_device(payload: DeviceCreateRequest, request: Request) -> dict[str, object]:
+    return _services(request).device_service.create(
+        name=payload.name,
+        platform=payload.platform,
+        host=payload.host,
+        port=payload.port,
+        user=payload.user,
+        auth_type=payload.auth_type,
+        credential=payload.credential.reveal(),
+        host_key_fingerprint=payload.host_key_fingerprint,
+    )
+
+
+@router.get("/api/v1/devices/{device_id}")
+async def device_detail(device_id: str, request: Request) -> dict[str, object]:
+    return _services(request).device_service.get(device_id)
+
+
+@router.patch("/api/v1/devices/{device_id}")
+async def update_device(
+    device_id: str, payload: DeviceUpdateRequest, request: Request
+) -> dict[str, object]:
+    changes = payload.model_dump(exclude={"credential"}, exclude_none=False)
+    changes = {key: value for key, value in changes.items() if key in payload.model_fields_set}
+    return _services(request).device_service.update(
+        device_id,
+        changes=changes,
+        credential=None if payload.credential is None else payload.credential.reveal(),
+    )
+
+
+@router.delete("/api/v1/devices/{device_id}")
+async def delete_device(device_id: str, request: Request) -> dict[str, object]:
+    return _services(request).device_service.delete(device_id)
+
+
+@router.post("/api/v1/devices/{device_id}/probe")
+async def probe_device(device_id: str, request: Request) -> dict[str, object]:
+    return await asyncio.to_thread(_services(request).device_service.probe, device_id)
+
+
+@router.get("/api/v1/board-runs")
+async def board_runs(request: Request, device_id: UUID | None = None) -> list[dict[str, object]]:
+    return _services(request).board_service.list(
+        device_id=None if device_id is None else str(device_id)
+    )
+
+
+@router.post("/api/v1/board-runs", status_code=status.HTTP_202_ACCEPTED)
+async def submit_board_run(payload: BoardRunRequest, request: Request) -> dict[str, object]:
+    return await _submit_board_operation(
+        device_id=str(payload.device_id), payload=payload, request=request
+    )
+
+
+@router.post("/api/v1/devices/{device_id}/board-runs", status_code=status.HTTP_202_ACCEPTED)
+async def submit_device_board_run(
+    device_id: str, payload: BoardOperationRequest, request: Request
+) -> dict[str, object]:
+    return await _submit_board_operation(device_id=device_id, payload=payload, request=request)
+
+
+async def _submit_board_operation(
+    *, device_id: str, payload: BoardOperationRequest, request: Request
+) -> dict[str, object]:
+    options = (
+        {}
+        if payload.mode == "model_info"
+        else {
+            "core_id": payload.core_id,
+            "thread_num": payload.thread_num,
+            "frame_count": payload.frame_count,
+            "perf_time_minutes": payload.perf_time_minutes,
+        }
+    )
+    options = {key: value for key, value in options.items() if value is not None}
+    services = _services(request)
+    run = await services.board_service.submit(
+        device_id=device_id,
+        conversion_run_id=str(payload.conversion_run_id),
+        mode=payload.mode,
+        options=options,
+    )
+    services.board_orchestrator.enqueue(run["id"])
+    return run
+
+
+@router.post("/api/v1/board-runs/infer", status_code=status.HTTP_202_ACCEPTED)
+async def submit_board_infer(
+    request: Request,
+    device_id: UUID,
+    conversion_run_id: UUID,
+    core_id: int = Query(default=0, ge=0, le=2),
+    filename: Annotated[str | None, Header(alias="X-Filename")] = None,
+    filename_b64: Annotated[str | None, Header(alias="X-Filename-B64")] = None,
+) -> dict[str, object]:
+    services = _services(request)
+    run = await services.board_service.submit(
+        device_id=str(device_id),
+        conversion_run_id=str(conversion_run_id),
+        mode="infer",
+        options={"core_id": core_id},
+        input_filename=_upload_filename(filename, filename_b64),
+        input_chunks=request.stream(),
+        content_length=_content_length(request),
+    )
+    services.board_orchestrator.enqueue(run["id"])
+    return run
+
+
+@router.get("/api/v1/board-runs/{board_run_id}")
+async def board_run_detail(board_run_id: str, request: Request) -> dict[str, object]:
+    return _services(request).board_service.get(board_run_id)
+
+
+async def _board_event_stream(request: Request, *, board_run_id: str) -> AsyncIterator[str]:
+    sequence = 0
+    previous: tuple[str, str] | None = None
+    while True:
+        detail = _services(request).board_service.get(board_run_id)
+        current = (detail["status"], detail["phase"])
+        if current != previous:
+            sequence += 1
+            yield (
+                f"id: {sequence}\nevent: status\ndata: "
+                + json.dumps(
+                    {"status": detail["status"], "phase": detail["phase"]},
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+            previous = current
+        if detail["status"] in TERMINAL_STATUSES:
+            yield "event: terminal\ndata: " + json.dumps({"status": detail["status"]}) + "\n\n"
+            return
+        if await request.is_disconnected():
+            return
+        await asyncio.sleep(0.5)
+
+
+@router.get("/api/v1/board-runs/{board_run_id}/events")
+async def board_run_events(board_run_id: str, request: Request) -> StreamingResponse:
+    _services(request).board_service.get(board_run_id)
+    return StreamingResponse(
+        _board_event_stream(request, board_run_id=board_run_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/api/v1/board-runs/{board_run_id}/cancel", status_code=status.HTTP_202_ACCEPTED)
+async def cancel_board_run(board_run_id: str, request: Request) -> dict[str, object]:
+    return _services(request).board_service.cancel(board_run_id)
+
+
+@router.get("/api/v1/board-runs/{board_run_id}/logs")
+async def board_run_log(board_run_id: str, request: Request) -> FileResponse:
+    path = _services(request).board_service.log_file(board_run_id)
+    return FileResponse(path, media_type="text/plain", filename=f"{board_run_id}.log")
+
+
+@router.get("/api/v1/board-runs/{board_run_id}/artifacts/{artifact_index}")
+async def board_artifact(board_run_id: str, artifact_index: int, request: Request) -> FileResponse:
+    path, metadata = _services(request).board_service.artifact_file(board_run_id, artifact_index)
+    return FileResponse(path, media_type=metadata["mime_type"], filename=metadata["name"])
 
 
 @router.post("/api/v1/run-comparisons")

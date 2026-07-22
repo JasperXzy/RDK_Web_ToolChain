@@ -17,6 +17,7 @@
     <nav class="topnav" aria-label="主导航">
       <button class="topnav-item active" data-view="workspace" type="button">工作台</button>
       <button class="topnav-item" data-view="runs" type="button">任务</button>
+      <button class="topnav-item" data-view="devices" type="button">开发板</button>
     </nav>
     <div class="topbar-actions">
       <button id="system-status" class="status-pill neutral status-button" type="button"><span></span>正在检查环境</button>
@@ -48,9 +49,9 @@
       <section id="workspace-view">
         <section id="welcome" class="welcome-panel">
           <div class="welcome-copy">
-            <span class="eyebrow accent">M3 · VERIFY & COMPARE</span>
+            <span class="eyebrow accent">M4 · BOARD VALIDATION</span>
             <h1><span>模型转换，</span><span>从黑盒变成工作流。</span></h1>
-            <p>导入 ONNX，冻结校准数据和平台配置，在隔离 Runner 中完成 S100 / S600 转换。每次执行都有独立日志、结果与可复现导出包。</p>
+            <p>导入 ONNX，冻结校准数据和平台配置，在隔离 Runner 中完成 S100 / S600 转换，再通过固定 SSH Host Key 的受控通道完成板端验证。</p>
             <div class="hero-actions"><button id="welcome-create" class="button primary" type="button">创建第一个项目</button><button id="welcome-preflight" class="button ghost" type="button">查看环境预检</button></div>
           </div>
           <div class="readiness-card">
@@ -115,8 +116,56 @@
         </div>
         <section class="panel"><div class="filter-bar"><label>状态<select id="run-filter"><option value="all">全部状态</option><option value="active">执行中</option><option value="SUCCEEDED">成功</option><option value="FAILED">失败</option><option value="CANCELLED">已取消</option><option value="INTERRUPTED">已中断</option></select></label><label>搜索<input id="run-search" type="search" placeholder="Run ID / 平台 / 项目"></label><label class="comparison-picker">选择 2–4 个成功转换<select id="comparison-runs" multiple size="3" aria-label="待比较任务"></select></label><button id="compare-runs" class="button secondary" type="button" disabled>比较任务</button></div><div id="all-run-list" class="run-list detailed"></div></section>
       </section>
+
+      <section id="devices-view" class="hidden">
+        <div class="page-heading"><div><span class="eyebrow">Board validation</span><h1>开发板与实测</h1><p>Controller 直接通过 SSH / SFTP 连接开发板；凭据只保存在本机加密 Secret Store，转换 Runner 仍保持断网。</p></div><div class="project-actions"><button id="refresh-devices" class="button ghost" type="button">刷新</button><button id="open-device-dialog" class="button primary" type="button">添加开发板</button></div></div>
+        <div class="run-summary-grid board-summary-grid">
+          <div><span>设备</span><strong id="devices-total">0</strong></div><div><span>可用</span><strong id="devices-ready">0</strong></div><div><span>板端运行</span><strong id="board-runs-total">0</strong></div><div><span>执行中</span><strong id="board-runs-active">0</strong></div>
+        </div>
+        <section class="panel">
+          <div class="panel-heading"><div><span class="step-label">DEVICES</span><h2>受信任设备</h2></div><span class="hint">首次探测必须确认 SHA256 Host Key</span></div>
+          <div id="device-list" class="device-grid"><div class="empty-state">尚未添加开发板</div></div>
+        </section>
+        <section class="panel activity-panel">
+          <div class="panel-heading"><div><span class="step-label">BOARD RUNS</span><h2>板端验证历史</h2></div><button id="open-board-run-dialog" class="button secondary" type="button">新建板端验证</button></div>
+          <div id="board-run-list" class="run-list"><div class="empty-state">设备探测成功、且已有 HBM 后即可运行 model_info / infer / perf。</div></div>
+        </section>
+      </section>
     </main>
   </div>
+
+  <dialog id="device-dialog" class="modal-dialog">
+    <form id="device-form" class="modal-shell">
+      <header class="dialog-header"><div><span class="eyebrow">New device</span><h2>添加开发板</h2><p>Host Key 可先留空；首次探测只显示指纹，确认后才会建立信任。</p></div><button class="close-button" data-close="device-dialog" type="button" aria-label="关闭">×</button></header>
+      <div class="device-form-body">
+        <div class="form-grid two"><label>设备名称<input id="device-name" maxlength="200" required placeholder="例如：实验室 S100"></label><label>平台<select id="device-platform"><option value="s100">RDK S100</option><option value="s600">RDK S600</option></select></label><label>主机 / IP<input id="device-host" maxlength="255" required placeholder="192.168.1.10"></label><label>SSH 端口<input id="device-port" type="number" min="1" max="65535" value="22" required></label><label>用户名<input id="device-user" maxlength="128" value="root" required></label><label>认证方式<select id="device-auth-type"><option value="password">密码</option><option value="private_key">私钥</option></select></label></div>
+        <label id="device-password-field">密码<input id="device-password" type="password" autocomplete="new-password"></label>
+        <label id="device-private-key-field" class="hidden">OpenSSH / PEM 私钥<textarea id="device-private-key" rows="6" autocomplete="off" spellcheck="false"></textarea></label>
+        <label id="device-passphrase-field" class="hidden">私钥口令（可选）<input id="device-passphrase" type="password" autocomplete="new-password"></label>
+        <label>SSH Host Key 指纹（可选）<input id="device-fingerprint" maxlength="96" placeholder="SHA256:…"></label>
+        <p class="security-note">密码或私钥不会进入 SQLite、日志、任务快照或导出包。保存后表单会立即清空。</p>
+      </div>
+      <footer class="dialog-footer"><span class="dialog-spacer"></span><button class="button ghost" data-close="device-dialog" type="button">取消</button><button class="button primary" type="submit">保存设备</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="board-run-create-dialog" class="modal-dialog">
+    <form id="board-run-form" class="modal-shell">
+      <header class="dialog-header"><div><span class="eyebrow">New board run</span><h2>新建板端验证</h2><p>只允许上传已完成转换的 HBM，并调用白名单内的 hrt_model_exec 模式。</p></div><button class="close-button" data-close="board-run-create-dialog" type="button" aria-label="关闭">×</button></header>
+      <div class="device-form-body">
+        <div class="form-grid two"><label>开发板<select id="board-device" required></select></label><label>成功转换 / HBM<select id="board-conversion" required></select></label><label>运行模式<select id="board-mode"><option value="model_info">model_info</option><option value="infer">infer</option><option value="perf">perf</option></select></label><label id="board-core-field" class="hidden">BPU Core<select id="board-core"><option value="0">自动调度</option><option value="1">Core 0</option><option value="2">Core 1</option></select></label></div>
+        <label id="board-input-field" class="hidden">推理输入<input id="board-input" type="file"></label>
+        <div id="board-perf-fields" class="form-grid two hidden"><label>线程数<input id="board-threads" type="number" min="1" max="32" value="1"></label><label>停止条件<select id="board-duration-mode"><option value="frames">帧数</option><option value="time">时间（分钟）</option></select></label><label id="board-frame-field">帧数<input id="board-frame-count" type="number" min="1" max="1000000" value="200"></label><label id="board-time-field" class="hidden">运行分钟数<input id="board-perf-time" type="number" min="1" max="1440" value="1"></label></div>
+        <p class="security-note">远端临时目录固定为 /tmp/rdkwt/&lt;run-id&gt;，完成或失败后自动清理。开发机 GPU 不参与此步骤。</p>
+        <div id="board-upload-progress" class="progress hidden"><span></span></div>
+      </div>
+      <footer class="dialog-footer"><span class="dialog-spacer"></span><button class="button ghost" data-close="board-run-create-dialog" type="button">取消</button><button class="button primary" type="submit">提交验证</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="board-run-dialog" class="modal-dialog board-run-dialog">
+    <div class="modal-shell"><header class="dialog-header"><div><span class="eyebrow">Board run</span><h2 id="board-run-title">板端验证详情</h2><p id="board-run-subtitle"></p></div><button class="close-button" data-close="board-run-dialog" type="button" aria-label="关闭">×</button></header><div id="board-run-detail" class="board-run-detail"></div><footer class="dialog-footer"><button id="cancel-board-run" class="button danger hidden" type="button">取消任务</button><span class="dialog-spacer"></span><button class="button ghost" data-close="board-run-dialog" type="button">完成</button></footer></div>
+  </dialog>
 
   <dialog id="wizard-dialog" class="sheet-dialog wizard-dialog">
     <div class="dialog-shell">

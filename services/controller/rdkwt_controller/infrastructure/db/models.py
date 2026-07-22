@@ -233,3 +233,56 @@ class Attempt(Base):
     recovered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     run: Mapped[ConversionRun] = relationship(back_populates="attempts")
+
+
+class Device(Base):
+    __tablename__ = "devices"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    platform: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    host: Mapped[str] = mapped_column(String(255), nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False, default=22)
+    user: Mapped[str] = mapped_column(String(128), nullable=False)
+    auth_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    credential_ref: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    host_key_fingerprint: Mapped[str | None] = mapped_column(String(96))
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNVERIFIED", index=True
+    )
+    detected_platform: Mapped[str | None] = mapped_column(String(16))
+    probe_result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    last_probe_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    last_probed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BoardRun(Base):
+    __tablename__ = "board_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    device_id: Mapped[str | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL"), index=True
+    )
+    conversion_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("conversion_runs.id", ondelete="SET NULL"), index=True
+    )
+    mode: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    phase: Mapped[str] = mapped_column(String(32), nullable=False, default="QUEUED")
+    device_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    options: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    local_dir: Mapped[str] = mapped_column(String(1024), nullable=False)
+    remote_dir: Mapped[str] = mapped_column(String(255), nullable=False)
+    hbm_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    hbm_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    result_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    error_code: Mapped[str | None] = mapped_column(String(128))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

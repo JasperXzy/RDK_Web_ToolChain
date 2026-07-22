@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -8,6 +9,8 @@ from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import MutableHeaders
@@ -17,14 +20,21 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from rdkwt_controller import __version__
 from rdkwt_controller.api import router
 from rdkwt_controller.application import (
+    BoardError,
+    BoardOrchestrator,
+    BoardService,
     CatalogError,
     CatalogService,
+    DeviceService,
     RunOrchestrator,
     RunService,
     SystemService,
 )
 from rdkwt_controller.infrastructure.assets import AssetStore
+from rdkwt_controller.infrastructure.board import BoardGateway
+from rdkwt_controller.infrastructure.credentials import CredentialStore
 from rdkwt_controller.infrastructure.db import (
+    BoardRepository,
     CatalogRepository,
     RunRepository,
     create_database,
@@ -46,6 +56,9 @@ class AppServices:
     run_service: RunService
     orchestrator: RunOrchestrator
     system_service: SystemService
+    device_service: DeviceService
+    board_service: BoardService
+    board_orchestrator: BoardOrchestrator
 
 
 class LocalSecurityMiddleware:
@@ -54,9 +67,7 @@ class LocalSecurityMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
-    async def __call__(
-        self, scope: Scope, receive: Receive, send: Send
-    ) -> None:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -68,8 +79,7 @@ class LocalSecurityMiddleware:
                 if headers.get("X-RDKWT-Sandbox-Report") is not None:
                     del headers["X-RDKWT-Sandbox-Report"]
                     headers["Content-Security-Policy"] = (
-                        "sandbox; default-src 'none'; style-src 'unsafe-inline'; "
-                        "img-src data:"
+                        "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:"
                     )
                 elif request.url.path not in {"/docs", "/redoc"}:
                     headers["Content-Security-Policy"] = (
@@ -98,9 +108,7 @@ class LocalSecurityMiddleware:
                 await response(scope, receive, send_with_security)
                 return
             session_key = request.cookies.get("rdkwt_session", "")
-            if not secrets.compare_digest(
-                session_key, request.app.state.session_key
-            ):
+            if not secrets.compare_digest(session_key, request.app.state.session_key):
                 response = _problem_response(
                     "SESSION_COOKIE_INVALID",
                     "a valid SameSite local session cookie is required",
@@ -109,9 +117,10 @@ class LocalSecurityMiddleware:
                 await response(scope, receive, send_with_security)
                 return
             origin = request.headers.get("origin")
-            if origin is not None and urlsplit(origin).netloc.lower() != request.headers.get(
-                "host", ""
-            ).lower():
+            if (
+                origin is not None
+                and urlsplit(origin).netloc.lower() != request.headers.get("host", "").lower()
+            ):
                 response = _problem_response(
                     "ORIGIN_NOT_ALLOWED",
                     "the request Origin does not match the local application origin",
@@ -127,6 +136,7 @@ def create_app(
     settings: Settings | None = None,
     *,
     docker_client: object | None = None,
+    board_gateway: BoardGateway | None = None,
 ) -> FastAPI:
     settings = Settings.from_env() if settings is None else settings
     settings.ensure_directories()
@@ -136,11 +146,10 @@ def create_app(
     session_factory = create_session_factory(engine)
     repository = RunRepository(session_factory)
     catalog_repository = CatalogRepository(session_factory)
+    board_repository = BoardRepository(session_factory)
     catalog_service = CatalogService(
         repository=catalog_repository,
-        asset_store=AssetStore(
-            settings.assets_dir, max_upload_bytes=settings.max_upload_bytes
-        ),
+        asset_store=AssetStore(settings.assets_dir, max_upload_bytes=settings.max_upload_bytes),
         runs_root=settings.runs_dir,
     )
     docker_gateway = (
@@ -165,13 +174,40 @@ def create_app(
         docker_gateway=docker_gateway,
         repository=repository,
     )
+    credential_store = CredentialStore(settings.secrets_dir)
+    board_gateway = board_gateway or BoardGateway(
+        connect_timeout=settings.board_connect_timeout_seconds,
+        command_timeout=settings.board_command_timeout_seconds,
+        max_output_bytes=settings.max_log_bytes,
+        max_download_bytes=settings.board_max_upload_bytes,
+    )
+    device_service = DeviceService(
+        repository=board_repository,
+        credential_store=credential_store,
+        gateway=board_gateway,
+    )
+    board_service = BoardService(
+        settings=settings,
+        repository=board_repository,
+        credential_store=credential_store,
+        gateway=board_gateway,
+        run_service=run_service,
+        profiles=profiles,
+    )
+    board_orchestrator = BoardOrchestrator(
+        service=board_service,
+        repository=board_repository,
+        gateway=board_gateway,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         orchestrator.start()
+        board_orchestrator.start()
         try:
             yield
         finally:
+            board_orchestrator.stop()
             orchestrator.stop()
 
     app = FastAPI(title="RDK WebToolChain", version=__version__, lifespan=lifespan)
@@ -189,12 +225,44 @@ def create_app(
         run_service=run_service,
         orchestrator=orchestrator,
         system_service=system_service,
+        device_service=device_service,
+        board_service=board_service,
+        board_orchestrator=board_orchestrator,
     )
     app.include_router(router)
 
     @app.exception_handler(CatalogError)
     async def catalog_error(_request: Request, exc: CatalogError) -> JSONResponse:
         return _problem_response(exc.code, str(exc), exc.status_code)
+
+    @app.exception_handler(BoardError)
+    async def board_error(_request: Request, exc: BoardError) -> JSONResponse:
+        response = _problem_response(exc.code, str(exc), exc.status_code)
+        if exc.observed_fingerprint is not None:
+            content = json.loads(bytes(response.body))
+            content["observed_fingerprint"] = exc.observed_fingerprint
+            return JSONResponse(
+                status_code=exc.status_code,
+                media_type="application/problem+json",
+                content=content,
+            )
+        return response
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_error(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        device_suffix = request.url.path.removeprefix("/api/v1/devices/")
+        credential_request = request.url.path == "/api/v1/devices" or (
+            request.method == "PATCH" and device_suffix and "/" not in device_suffix
+        )
+        if credential_request:
+            return _problem_response(
+                "DEVICE_REQUEST_INVALID",
+                "device request validation failed; credential values were omitted",
+                422,
+            )
+        return await request_validation_exception_handler(request, exc)
 
     web_root = Path(__file__).with_name("web")
     app.mount("/static", StaticFiles(directory=web_root), name="static")

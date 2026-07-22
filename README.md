@@ -1,11 +1,13 @@
 # RDK WebToolChain
 
 RDK WebToolChain 是面向 S100/S600 与 OpenExplorer 3.7.0 的本地模型转换工作台。
-当前代码已完成 M3 的 CPU 发布路径：用户可在浏览器中完成环境预检、ONNX 检查、单/多输入
+当前代码已完成 M4 软件闭环：用户可在浏览器中完成环境预检、ONNX 检查、单/多输入
 校准、动态 Shape 配置、队列执行、HBRuntime/`hb_verifier` 验证、任务比较、缓存、结果查看和
-可复现导出。GPU 控制面已实现但默认关闭，需在 OpenExplorer 支持的 GPU 主机上另行验收。
+可复现导出，并把成功 HBM 关联到 S100/S600 开发板执行 `model_info/infer/perf`。GPU 控制面
+已实现但默认关闭；本机新 GPU 不受 OE 支持，但这不影响 CPU 转换和板端验证。真实板卡门禁
+需在有对应设备与凭据时执行。
 
-## 当前能力（M3）
+## 当前能力（M4）
 
 - 首次启动预检 Docker Engine、`linux/amd64`、CPU 固定镜像、状态/资产/任务/缓存存储和剩余
   空间，并运行受控 Runner Smoke Test；GPU 是可选检查，不可用时不会阻断 CPU。
@@ -26,6 +28,10 @@ RDK WebToolChain 是面向 S100/S600 与 OpenExplorer 3.7.0 的本地模型转�
   Key；支持启用、关闭或强制重建，每次仍保留独立 Run 历史。
 - 默认只监听本机，Runner 禁网、只读根文件系统、无特权、无 Docker Socket；Web 修改请求
   使用 HttpOnly SameSite 会话、CSRF、Host/Origin 校验，HTML 报告在 sandbox iframe 中展示。
+- 开发板凭据使用本机 Fernet Secret Store，SQLite 和 API 只保存/返回非敏感引用或元数据；
+  SSH 禁用 Agent/默认密钥并强制固定 Host Key，首次指纹必须显式确认，变化时拒绝连接。
+- 板端任务只允许同平台成功 HBM 和固定 `hrt_model_exec model_info/infer/perf`，远端目录固定在
+  `/tmp/rdkwt/<run-id>`，支持 SSE 状态、取消、原始日志、推理输出、profile 和结构化实测指标。
 
 ## 本地运行
 
@@ -47,10 +53,13 @@ docker compose --env-file infra/.env -f infra/compose.yaml up -d --build
 ```
 
 浏览器访问 `http://127.0.0.1:8080/`。首次打开会自动执行预检；环境可用后，按“项目 →
-上传 ONNX → 等待模型检查 → 创建并定稿校准集 → 新建转换”的顺序操作。
+上传 ONNX → 等待模型检查 → 创建并定稿校准集 → 新建转换”的顺序生成 HBM。随后打开
+“开发板”，添加并探测设备、通过可信渠道核对 Host Key，再创建板端验证。
 
 常用部署参数位于 `infra/.env`，包括 Runner 镜像、任务超时、日志/上传上限、最低剩余
-磁盘、Runner 内存、CPU、PID 上限、缓存和可选 GPU 设置。修改后需重建或重启 Controller。
+磁盘、Runner 内存、CPU、PID 上限、缓存、板端连接/命令超时和可选 GPU 设置。修改后需重建
+或重启 Controller。Secret Store 位于状态卷 `/state/secrets`；备份时必须同时保存
+`master.key`，但不得把该目录提交到 Git 或普通诊断包。
 
 ### GPU 注意事项
 
@@ -58,6 +67,12 @@ docker compose --env-file infra/.env -f infra/compose.yaml up -d --build
 版本明确兼容时，才构建 `runner/Dockerfile.gpu` 并配置固定镜像。当前开发机显卡代际过新，
 没有运行 GPU OE；CPU 转换和真实发布门禁不依赖 GPU。兼容主机的步骤见
 [M3 发布检查表](docs/M3_RELEASE_CHECKLIST.md)。
+
+### 板端注意事项
+
+板端运行由 Controller 通过 SSH/SFTP 直接完成，不依赖开发机 GPU。先在设备控制台或可信
+运维渠道取得 Host Key 指纹；网页首次观察到的值只能用于比对，不能替代带外核验。完整的
+正向、负向和清理验收见 [M4 板端发布检查表](docs/M4_RELEASE_CHECKLIST.md)。
 
 ## 本地开发与验证
 
@@ -99,11 +114,13 @@ Adapter Golden 说明见
 `X-Filename` 或 UTF-8 Base64 编码的 `X-Filename-B64` 传递。转换 API 只接受已登记的资源
 版本 ID 和白名单配置，不接受镜像、命令、宿主机路径、挂载或 `privileged` 参数。
 
-当前正式发布路径是 CPU Runner 与 PTQ，支持 1～4 输入、动态目标 Shape、图片/直接 NPY/
-多输入 NPY 校准、数值验证、比较和缓存。GPU 控制面已实现但尚未在兼容硬件上完成真实门禁；
-板端 SSH/SFTP、`model_info/infer/perf` 属于 M4。
+当前正式转换路径是 CPU Runner 与 PTQ，支持 1～4 输入、动态目标 Shape、图片/直接 NPY/
+多输入 NPY 校准、数值验证、比较和缓存。板端 SSH/SFTP、`model_info/infer/perf` 的软件闭环
+已完成；只有在对应真实设备上跑完 M4 门禁后，才可宣称该平台已完成实机验证。GPU 控制面
+尚未在兼容硬件上完成真实门禁。
 
 产品范围与工程边界见 [PRD](docs/PRD.md)、[项目设计文档](docs/PROJECT_DESIGN.md) 和
 [M2 编排决策](docs/adr/ADR-014-m2-orchestration-and-web-product.md) 和
 [M2.1 发布加固决策](docs/adr/ADR-015-m2-1-calibration-and-release-gate.md)，以及
-[M3 验证与可选 GPU 决策](docs/adr/ADR-016-m3-verification-comparison-and-optional-gpu.md)。
+[M3 验证与可选 GPU 决策](docs/adr/ADR-016-m3-verification-comparison-and-optional-gpu.md) 和
+[M4 板端安全边界](docs/adr/ADR-017-m4-board-validation-security-boundary.md)。

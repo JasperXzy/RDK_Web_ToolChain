@@ -2204,6 +2204,17 @@ ResNet18 和 20 份 ImageNet 样本依次生成 `nash-e`/单 Core 与 `nash-p`/�
 - `model_info/infer/perf`。
 - 板端指标和历史。
 
+退出条件：加密凭据和固定 SSH Host Key 边界通过自动化测试；`model_info/infer/perf`、取消、
+清理、日志、产物与指标形成 Web/API/SQLite 闭环；对应平台的实机发布状态只有在真实板卡门禁
+完成后才能标记为已验证。
+
+实施状态（2026-07-22）：M4 软件闭环、迁移 `0006_m4_board_validation`、设备页和无板卡自动化
+门禁已完成。Controller 直接 SSH/SFTP，Runner 继续禁网；凭据只进入 `/state/secrets`，首次
+Host Key 必须显式确认。当前未提供真实板卡或凭据，因此 S100/S600 实机门禁保持“待板卡
+执行”；开发机 GPU/OE 不兼容不影响该路径。详细边界和复跑步骤见
+[ADR-017](./adr/ADR-017-m4-board-validation-security-boundary.md) 与
+[M4 发布检查表](./M4_RELEASE_CHECKLIST.md)。
+
 ## 32. Architecture Decision Records 摘要
 
 后续可将以下决策拆为独立 ADR：
@@ -2226,6 +2237,7 @@ ResNet18 和 20 份 ImageNet 样本依次生成 `nash-e`/单 Core 与 `nash-p`/�
 | ADR-014 | 持久任务编排与 Web 产品闭环 |
 | ADR-015 | 校准输入与真实发布门禁 |
 | ADR-016 | 数值验证、多输入、比较、缓存与可选 GPU |
+| ADR-017 | 板端验证、加密凭据与固定 SSH Host Key |
 
 ## 33. 仍需通过 Spike 验证的技术点
 
