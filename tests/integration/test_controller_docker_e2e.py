@@ -86,6 +86,22 @@ def test_controller_creates_collects_and_cleans_restricted_runner() -> None:
     controller = None
     run_id = None
     try:
+        socket_gid = int(
+            client.containers.run(
+                controller_image,
+                command=["-c", "%g", "/var/run/docker.sock"],
+                entrypoint="stat",
+                network_disabled=True,
+                read_only=True,
+                remove=True,
+                volumes={
+                    "/var/run/docker.sock": {
+                        "bind": "/var/run/docker.sock",
+                        "mode": "ro",
+                    }
+                },
+            )
+        )
         populate_script = (
             "import pathlib;"
             "asset=pathlib.Path('/assets/probe/model.bin');"
@@ -100,6 +116,23 @@ def test_controller_creates_collects_and_cleans_restricted_runner() -> None:
             remove=True,
             volumes={assets_name: {"bind": "/assets", "mode": "rw"}},
         )
+        client.containers.run(
+            controller_image,
+            entrypoint="/usr/local/bin/rdkwt-volume-init",
+            user="0:0",
+            read_only=True,
+            cap_drop=["ALL"],
+            cap_add=["CHOWN", "DAC_OVERRIDE", "FOWNER"],
+            security_opt=["no-new-privileges"],
+            network_disabled=True,
+            remove=True,
+            volumes={
+                state_name: {"bind": "/state", "mode": "rw"},
+                assets_name: {"bind": "/assets", "mode": "rw"},
+                runs_name: {"bind": "/runs", "mode": "rw"},
+                cache_name: {"bind": "/cache", "mode": "rw"},
+            },
+        )
         controller = client.containers.run(
             controller_image,
             name=controller_name,
@@ -107,7 +140,7 @@ def test_controller_creates_collects_and_cleans_restricted_runner() -> None:
             read_only=True,
             cap_drop=["ALL"],
             security_opt=["no-new-privileges"],
-            group_add=[65534],
+            group_add=[str(socket_gid)],
             network_disabled=True,
             tmpfs={"/tmp": "rw,noexec,nosuid,size=256m"},
             environment={
@@ -132,6 +165,20 @@ def test_controller_creates_collects_and_cleans_restricted_runner() -> None:
             },
         )
         _wait_for_controller(controller)
+        identity_exit, identity = controller.exec_run(["id", "-u"])
+        assert identity_exit == 0
+        assert identity.strip() == b"10001"
+        writable_exit, writable_output = controller.exec_run(
+            [
+                "sh",
+                "-c",
+                (
+                    "test ! -w /app && test -w /state && test -w /assets "
+                    "&& test -w /runs && test -w /cache"
+                ),
+            ]
+        )
+        assert writable_exit == 0, writable_output.decode(errors="replace")
         preflight = _container_http_json(controller, "/api/v1/system/preflight")
         assert preflight["available"] is True  # type: ignore[index]
 

@@ -1,13 +1,14 @@
 # RDK WebToolChain
 
 RDK WebToolChain 是面向 S100/S600 与 OpenExplorer 3.7.0 的本地模型转换工作台。
-当前代码已完成 M4 软件闭环：用户可在浏览器中完成环境预检、ONNX 检查、单/多输入
+当前代码已完成 M5 软件闭环：用户可在浏览器中完成环境预检、ONNX 检查、单/多输入
 校准、动态 Shape 配置、队列执行、HBRuntime/`hb_verifier` 验证、任务比较、缓存、结果查看和
 可复现导出，并把成功 HBM 关联到 S100/S600 开发板执行 `model_info/infer/perf`。GPU 控制面
 已实现但默认关闭；本机新 GPU 不受 OE 支持，但这不影响 CPU 转换和板端验证。真实板卡门禁
-需在有对应设备与凭据时执行。
+需在有对应设备与凭据时执行。M5 另提供项目便携包、存储安全清理、带 SHA-256 清单的系统
+备份与停服恢复、脱敏诊断和非 root Controller。
 
-## 当前能力（M4）
+## 当前能力（M5）
 
 - 首次启动预检 Docker Engine、`linux/amd64`、CPU 固定镜像、状态/资产/任务/缓存存储和剩余
   空间，并运行受控 Runner Smoke Test；GPU 是可选检查，不可用时不会阻断 CPU。
@@ -32,6 +33,15 @@ RDK WebToolChain 是面向 S100/S600 与 OpenExplorer 3.7.0 的本地模型转�
   SSH 禁用 Agent/默认密钥并强制固定 Host Key，首次指纹必须显式确认，变化时拒绝连接。
 - 板端任务只允许同平台成功 HBM 和固定 `hrt_model_exec model_info/infer/perf`，远端目录固定在
   `/tmp/rdkwt/<run-id>`，支持 SSE 状态、取消、原始日志、推理输出、profile 和结构化实测指标。
+- 项目可导出/导入模型与校准输入；ZIP 路径、大小、压缩比和逐文件哈希严格校验，导入模型
+  必须重新检查，不携带任务、设备或凭据。
+- “维护”页展示四个持久卷的占用与余量；清理必须先预览并回传一次性令牌，活动任务期间拒绝
+  执行，且只触及上传暂存、可再生导出、孤立任务目录和缓存，不自动删除成功 HBM。
+- 系统备份使用 SQLite 一致快照和逐文件 SHA-256，可选任务与加密凭据、始终排除缓存；恢复
+  必须停服执行并先创建恢复前安全备份。诊断 JSON 不包含凭据、环境变量、日志或业务文件。
+- 一次性 `volume-init` 服务在首次升级时迁移 Named Volume 所有权；Controller 随后直接以
+  专用非 root `rdkwt` 用户、只读根文件系统和零 Linux Capability 运行。Docker Socket 仍属于
+  高权限边界，因此服务保持本机监听和白名单参数。
 
 ## 本地运行
 
@@ -44,12 +54,20 @@ docker build \
   .
 ```
 
-准备 Compose 环境文件，将 `DOCKER_GID` 改为本机
-`stat -c '%g' /var/run/docker.sock` 的结果，然后启动：
+推荐使用 M5 运维入口，它会检查 Docker、自动写入实际 Socket GID、保护 `.env` 权限并启动：
 
 ```bash
-cp infra/.env.example infra/.env
-docker compose --env-file infra/.env -f infra/compose.yaml up -d --build
+./scripts/rdkwt.sh install
+```
+
+也可手动准备 Compose 环境文件；但在启用 user namespace/remap 的 Docker 上，宿主看到的
+Socket GID 可能不同于容器内 GID，因此仍应先执行 `./scripts/rdkwt.sh doctor` 自动探测，再启动：
+
+```bash
+cp --no-clobber infra/.env.example infra/.env
+docker compose --env-file infra/.env -f infra/compose.yaml build controller
+./scripts/rdkwt.sh doctor
+docker compose --env-file infra/.env -f infra/compose.yaml up -d controller
 ```
 
 浏览器访问 `http://127.0.0.1:8080/`。首次打开会自动执行预检；环境可用后，按“项目 →
@@ -60,6 +78,20 @@ docker compose --env-file infra/.env -f infra/compose.yaml up -d --build
 磁盘、Runner 内存、CPU、PID 上限、缓存、板端连接/命令超时和可选 GPU 设置。修改后需重建
 或重启 Controller。Secret Store 位于状态卷 `/state/secrets`；备份时必须同时保存
 `master.key`，但不得把该目录提交到 Git 或普通诊断包。
+
+常用维护命令：
+
+```bash
+./scripts/rdkwt.sh doctor
+./scripts/rdkwt.sh backup
+./scripts/rdkwt.sh diagnostics
+./scripts/rdkwt.sh upgrade
+# 恢复文件先在“维护”页上传校验，然后：
+./scripts/rdkwt.sh restore backup-YYYYMMDDTHHMMSSZ-xxxxxxxx.rdkwt-backup.zip
+```
+
+恢复会短暂停服，并在覆盖前自动创建 `pre-restore` 安全备份。重要备份仍应下载到另一块受控
+存储介质；包含凭据的备份同时包含主密钥，必须按认证材料保护。
 
 ### GPU 注意事项
 
@@ -123,4 +155,6 @@ Adapter Golden 说明见
 [M2 编排决策](docs/adr/ADR-014-m2-orchestration-and-web-product.md) 和
 [M2.1 发布加固决策](docs/adr/ADR-015-m2-1-calibration-and-release-gate.md)，以及
 [M3 验证与可选 GPU 决策](docs/adr/ADR-016-m3-verification-comparison-and-optional-gpu.md) 和
-[M4 板端安全边界](docs/adr/ADR-017-m4-board-validation-security-boundary.md)。
+[M4 板端安全边界](docs/adr/ADR-017-m4-board-validation-security-boundary.md)，以及
+[M5 发布维护决策](docs/adr/ADR-018-m5-release-maintenance.md) 和
+[M5 发布检查表](docs/M5_RELEASE_CHECKLIST.md)。

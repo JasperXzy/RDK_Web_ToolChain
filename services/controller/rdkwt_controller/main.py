@@ -26,6 +26,8 @@ from rdkwt_controller.application import (
     CatalogError,
     CatalogService,
     DeviceService,
+    MaintenanceError,
+    MaintenanceService,
     RunOrchestrator,
     RunService,
     SystemService,
@@ -59,6 +61,7 @@ class AppServices:
     device_service: DeviceService
     board_service: BoardService
     board_orchestrator: BoardOrchestrator
+    maintenance_service: MaintenanceService
 
 
 class LocalSecurityMiddleware:
@@ -152,6 +155,7 @@ def create_app(
         asset_store=AssetStore(settings.assets_dir, max_upload_bytes=settings.max_upload_bytes),
         runs_root=settings.runs_dir,
     )
+    catalog_service.set_exports_root(settings.project_exports_dir)
     docker_gateway = (
         DockerGateway.from_env(settings)
         if docker_client is None
@@ -173,6 +177,14 @@ def create_app(
         settings=settings,
         docker_gateway=docker_gateway,
         repository=repository,
+    )
+    maintenance_service = MaintenanceService(
+        settings=settings,
+        app_version=__version__,
+        run_repository=repository,
+        board_repository=board_repository,
+        catalog_repository=catalog_repository,
+        system_service=system_service,
     )
     credential_store = CredentialStore(settings.secrets_dir)
     board_gateway = board_gateway or BoardGateway(
@@ -228,6 +240,7 @@ def create_app(
         device_service=device_service,
         board_service=board_service,
         board_orchestrator=board_orchestrator,
+        maintenance_service=maintenance_service,
     )
     app.include_router(router)
 
@@ -247,6 +260,10 @@ def create_app(
                 content=content,
             )
         return response
+
+    @app.exception_handler(MaintenanceError)
+    async def maintenance_error(_request: Request, exc: MaintenanceError) -> JSONResponse:
+        return _problem_response(exc.code, str(exc), exc.status_code)
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(

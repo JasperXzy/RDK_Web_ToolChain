@@ -57,7 +57,10 @@ def test_restricted_openexplorer_runner_contract(tmp_path) -> None:
         "asset.write_bytes(b'rdkwt-integration-probe');"
         f"request=pathlib.Path('/runs/{run_id}/attempts/1/request.json');"
         "request.parent.mkdir(parents=True);"
-        "request.write_bytes(base64.b64decode(os.environ['REQUEST_B64']))"
+        "request.write_bytes(base64.b64decode(os.environ['REQUEST_B64']));"
+        "roots=[pathlib.Path('/assets'),pathlib.Path('/runs'),pathlib.Path('/cache')];"
+        "targets=roots+[item for root in roots for item in root.rglob('*')];"
+        "[os.chown(item,10001,10001) for item in targets]"
     )
     settings = Settings(
         state_dir=tmp_path / "state",
@@ -82,6 +85,7 @@ def test_restricted_openexplorer_runner_contract(tmp_path) -> None:
             volumes={
                 assets_volume_name: {"bind": "/assets", "mode": "rw"},
                 runs_volume_name: {"bind": "/runs", "mode": "rw"},
+                cache_volume_name: {"bind": "/cache", "mode": "rw"},
             },
         )
         runner = gateway.create_attempt(run_id=run_id, attempt=1)

@@ -18,6 +18,7 @@
       <button class="topnav-item active" data-view="workspace" type="button">工作台</button>
       <button class="topnav-item" data-view="runs" type="button">任务</button>
       <button class="topnav-item" data-view="devices" type="button">开发板</button>
+      <button class="topnav-item" data-view="maintenance" type="button">维护</button>
     </nav>
     <div class="topbar-actions">
       <button id="system-status" class="status-pill neutral status-button" type="button"><span></span>正在检查环境</button>
@@ -37,6 +38,7 @@
         <label>备注<textarea id="project-description" maxlength="4000" rows="2" placeholder="用途、数据来源或负责人"></textarea></label>
         <div class="form-actions"><button class="button primary small" type="submit">创建</button><button id="cancel-create-project" class="button ghost small" type="button">取消</button></div>
       </form>
+      <label class="button ghost small project-import-button" for="project-import">导入项目包<input id="project-import" type="file" accept=".zip"></label>
       <nav id="project-list" class="project-list" aria-label="项目列表"></nav>
       <div id="project-empty" class="sidebar-empty">还没有项目。创建一个项目开始管理模型和校准数据。</div>
       <div class="sidebar-foot">
@@ -49,7 +51,7 @@
       <section id="workspace-view">
         <section id="welcome" class="welcome-panel">
           <div class="welcome-copy">
-            <span class="eyebrow accent">M4 · BOARD VALIDATION</span>
+            <span class="eyebrow accent">M5 · RELEASE &amp; MAINTENANCE</span>
             <h1><span>模型转换，</span><span>从黑盒变成工作流。</span></h1>
             <p>导入 ONNX，冻结校准数据和平台配置，在隔离 Runner 中完成 S100 / S600 转换，再通过固定 SSH Host Key 的受控通道完成板端验证。</p>
             <div class="hero-actions"><button id="welcome-create" class="button primary" type="button">创建第一个项目</button><button id="welcome-preflight" class="button ghost" type="button">查看环境预检</button></div>
@@ -64,7 +66,7 @@
         <section id="project-workspace" class="hidden">
           <div class="project-header">
             <div class="project-title"><span class="eyebrow">Current project</span><h1 id="current-project-name"></h1><p id="current-project-description"></p><button id="delete-project" class="danger-link" type="button">删除项目</button></div>
-            <div class="project-actions"><button id="refresh-project" class="button ghost" type="button">刷新</button><button id="open-wizard" class="button primary" type="button">新建转换</button></div>
+            <div class="project-actions"><a id="export-project" class="button ghost" href="#">导出项目</a><button id="refresh-project" class="button ghost" type="button">刷新</button><button id="open-wizard" class="button primary" type="button">新建转换</button></div>
           </div>
 
           <div class="project-metrics">
@@ -130,6 +132,35 @@
           <div class="panel-heading"><div><span class="step-label">BOARD RUNS</span><h2>板端验证历史</h2></div><button id="open-board-run-dialog" class="button secondary" type="button">新建板端验证</button></div>
           <div id="board-run-list" class="run-list"><div class="empty-state">设备探测成功、且已有 HBM 后即可运行 model_info / infer / perf。</div></div>
         </section>
+      </section>
+
+      <section id="maintenance-view" class="hidden">
+        <div class="page-heading"><div><span class="eyebrow">Release &amp; maintenance</span><h1>本机维护</h1><p>查看磁盘、预览后清理可再生文件，并创建或校验包含完整性清单的本地备份。</p></div><div class="project-actions"><a class="button ghost" href="/api/v1/maintenance/diagnostics">下载诊断</a><button id="refresh-maintenance" class="button primary" type="button">刷新</button></div></div>
+        <div id="storage-roots" class="maintenance-metrics"><div class="empty-state">正在读取存储信息…</div></div>
+        <div class="section-grid maintenance-grid">
+          <section class="panel">
+            <div class="panel-heading"><div><span class="step-label">SAFE CLEANUP</span><h2>可回收空间</h2></div><span id="cleanup-total" class="hint">尚未预览</span></div>
+            <form id="cleanup-form" class="maintenance-form">
+              <label class="maintenance-check"><input type="checkbox" name="cleanup-category" value="stale_uploads"><span><strong>过期上传暂存</strong><small>仅清理超过 24 小时的未完成上传</small></span><code id="cleanable-stale_uploads">—</code></label>
+              <label class="maintenance-check"><input type="checkbox" name="cleanup-category" value="generated_exports"><span><strong>生成的导出包</strong><small>任务复现包和项目导出包可按需重新生成</small></span><code id="cleanable-generated_exports">—</code></label>
+              <label class="maintenance-check"><input type="checkbox" name="cleanup-category" value="orphan_run_directories"><span><strong>孤立任务目录</strong><small>仅限数据库中已不存在的 UUID 任务目录</small></span><code id="cleanable-orphan_run_directories">—</code></label>
+              <label class="maintenance-check"><input type="checkbox" name="cleanup-category" value="cache"><span><strong>编译缓存</strong><small>不删除 HBM；后续转换会重新构建缓存</small></span><code id="cleanable-cache">—</code></label>
+              <div class="split-actions"><button class="button ghost" type="submit">生成清理预览</button><button id="execute-cleanup" class="button danger" type="button" disabled>确认并清理</button></div>
+              <p id="cleanup-note" class="security-note">任何任务处于排队或运行状态时，清理操作都会被阻止。</p>
+            </form>
+          </section>
+          <section class="panel">
+            <div class="panel-heading"><div><span class="step-label">BACKUP &amp; RESTORE</span><h2>本地备份</h2></div><span class="hint">缓存不进入备份</span></div>
+            <form id="backup-form" class="maintenance-form">
+              <label class="maintenance-check compact"><input id="backup-runs" type="checkbox" checked><span><strong>包含转换与板端任务</strong><small>保存日志、HBM 和板端产物</small></span></label>
+              <label class="maintenance-check compact"><input id="backup-credentials" type="checkbox" checked><span><strong>包含加密凭据</strong><small>连同 master.key 保存；备份文件必须妥善保管</small></span></label>
+              <button class="button secondary" type="submit">创建已校验备份</button>
+            </form>
+            <label class="button ghost backup-import-button" for="backup-import">上传并校验已有备份<input id="backup-import" type="file" accept=".zip"></label>
+            <div id="backup-list" class="backup-list"><div class="empty-state">尚未读取备份</div></div>
+            <p class="security-note restore-note">恢复必须停服执行：先在此上传并通过校验，再运行 <code>./scripts/rdkwt.sh restore &lt;文件名&gt;</code>。命令会先创建恢复前安全备份。</p>
+          </section>
+        </div>
       </section>
     </main>
   </div>

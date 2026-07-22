@@ -210,6 +210,7 @@ class DockerGateway:
             "detach": True,
             "stdin_open": False,
             "tty": False,
+            "user": f"{self._settings.runner_uid}:{self._settings.runner_gid}",
             "auto_remove": False,
             "network_disabled": True,
             "read_only": True,

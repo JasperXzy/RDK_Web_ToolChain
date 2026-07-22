@@ -32,6 +32,7 @@ dev = [
 
 [project.scripts]
 rdkwt-controller = "rdkwt_controller.main:run"
+rdkwt-maintenance = "rdkwt_controller.maintenance_cli:main"
 rdkwt-runner = "rdkwt_runner.__main__:main"
 
 [tool.setuptools.packages.find]
@@ -47,6 +48,7 @@ addopts = "-ra --strict-markers"
 testpaths = ["tests"]
 pythonpath = ["services/controller", "packages/contracts", "runner"]
 markers = [
+  "integration: exercises multiple application or runtime boundaries",
   "docker: requires access to a local Docker Engine",
   "release: runs the explicit local release acceptance gate",
 ]

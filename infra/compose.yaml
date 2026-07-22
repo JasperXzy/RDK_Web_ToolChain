@@ -1,11 +1,45 @@
 services:
+  volume-init:
+    image: rdk-webtoolchain/controller:0.1-dev
+    restart: "no"
+    user: "0:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges
+    entrypoint:
+      - /usr/local/bin/rdkwt-volume-init
+    volumes:
+      - rdkwt-state:/state
+      - rdkwt-assets:/assets
+      - rdkwt-runs:/runs
+      - rdkwt-cache:/cache
+
   controller:
     build:
       context: ..
       dockerfile: infra/Dockerfile.controller
+      args:
+        RDKWT_UID: "${RDKWT_UID:-10001}"
+        RDKWT_GID: "${RDKWT_GID:-10001}"
     image: rdk-webtoolchain/controller:0.1-dev
     container_name: rdkwt-controller
     restart: unless-stopped
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
     ports:
       - "127.0.0.1:${RDKWT_PORT:-8080}:8080"
     group_add:
@@ -36,10 +70,15 @@ services:
       RDKWT_DEFAULT_TIMEOUT_SECONDS: "${RDKWT_DEFAULT_TIMEOUT_SECONDS:-14400}"
       RDKWT_MAX_LOG_BYTES: "${RDKWT_MAX_LOG_BYTES:-104857600}"
       RDKWT_MAX_UPLOAD_BYTES: "${RDKWT_MAX_UPLOAD_BYTES:-2147483648}"
+      RDKWT_MAX_BACKUP_BYTES: "${RDKWT_MAX_BACKUP_BYTES:-8589934592}"
+      RDKWT_MAX_BACKUP_UNCOMPRESSED_BYTES: "${RDKWT_MAX_BACKUP_UNCOMPRESSED_BYTES:-34359738368}"
+      RDKWT_MAX_BACKUP_ENTRIES: "${RDKWT_MAX_BACKUP_ENTRIES:-200000}"
       RDKWT_MIN_FREE_DISK_BYTES: "${RDKWT_MIN_FREE_DISK_BYTES:-536870912}"
       RDKWT_RUNNER_MEMORY: "${RDKWT_RUNNER_MEMORY:-8g}"
       RDKWT_RUNNER_NANO_CPUS: "${RDKWT_RUNNER_NANO_CPUS:-4000000000}"
       RDKWT_RUNNER_PIDS_LIMIT: "${RDKWT_RUNNER_PIDS_LIMIT:-512}"
+      RDKWT_RUNNER_UID: "${RDKWT_UID:-10001}"
+      RDKWT_RUNNER_GID: "${RDKWT_GID:-10001}"
       RDKWT_STOP_TIMEOUT_SECONDS: "${RDKWT_STOP_TIMEOUT_SECONDS:-15}"
       RDKWT_BOARD_CONNECT_TIMEOUT_SECONDS: "${RDKWT_BOARD_CONNECT_TIMEOUT_SECONDS:-10}"
       RDKWT_BOARD_COMMAND_TIMEOUT_SECONDS: "${RDKWT_BOARD_COMMAND_TIMEOUT_SECONDS:-1800}"

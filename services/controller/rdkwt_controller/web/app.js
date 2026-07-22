@@ -30,6 +30,9 @@ const state = {
   currentBoardRun: null,
   boardEventSource: null,
   boardUploadLimit: 0,
+  maintenance: null,
+  backups: [],
+  cleanupPreview: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -205,6 +208,7 @@ function renderCurrentProject() {
   $("#metric-runs").textContent = projectRuns.length;
   $("#metric-run-success").textContent = `${projectRuns.filter((run) => run.status === "SUCCEEDED").length} 成功`;
   $("#metric-storage").textContent = formatBytes(diskBytes);
+  $("#export-project").href = `/api/v1/projects/${project.id}/export`;
   renderModels();
   renderCalibrations();
   renderProjectRuns();
@@ -432,7 +436,67 @@ function showView(view) {
   $("#workspace-view").classList.toggle("hidden", view !== "workspace");
   $("#runs-view").classList.toggle("hidden", view !== "runs");
   $("#devices-view").classList.toggle("hidden", view !== "devices");
+  $("#maintenance-view").classList.toggle("hidden", view !== "maintenance");
   $$(".topnav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+  if (view === "maintenance") loadMaintenance().catch((error) => toast(error.message, true));
+}
+
+async function loadMaintenance() {
+  const [storage, backups] = await Promise.all([
+    api("/api/v1/maintenance/storage"),
+    api("/api/v1/maintenance/backups"),
+  ]);
+  state.maintenance = storage;
+  state.backups = backups;
+  renderMaintenance();
+}
+
+function renderMaintenance() {
+  const root = $("#storage-roots");
+  root.replaceChildren();
+  (state.maintenance?.roots || []).forEach((record) => {
+    const card = el("div", "maintenance-metric");
+    card.append(
+      el("span", "", record.name),
+      el("strong", "", formatBytes(record.used_bytes)),
+      el("small", "", `${formatBytes(record.filesystem_free_bytes)} 可用`),
+    );
+    root.append(card);
+  });
+  const cleanable = state.maintenance?.cleanable || {};
+  Object.entries(cleanable).forEach(([category, summary]) => {
+    const node = $(`#cleanable-${category}`);
+    if (node) node.textContent = `${summary.candidate_count} 项 · ${formatBytes(summary.reclaimable_bytes)}`;
+  });
+  const active = state.maintenance?.active_tasks?.total || 0;
+  $("#cleanup-note").textContent = active
+    ? `当前有 ${active} 个活动任务；所有任务结束后才允许清理。`
+    : "当前没有活动任务。执行前仍会重新核对文件列表与一次性确认令牌。";
+  const backupList = $("#backup-list");
+  backupList.replaceChildren();
+  state.backups.forEach((backup) => {
+    const row = el("div", "backup-row");
+    const copy = el("div");
+    copy.append(
+      el("strong", "", backup.filename),
+      el("small", "", backup.verified
+        ? `${formatBytes(backup.size_bytes)} · ${backup.file_count} 文件 · ${formatDate(backup.created_at)}`
+        : `${formatBytes(backup.size_bytes)} · 校验失败 ${backup.error_code}`),
+    );
+    if (backup.verified) {
+      const link = el("a", "button ghost small", "下载");
+      link.href = `/api/v1/maintenance/backups/${encodeURIComponent(backup.filename)}`;
+      row.append(copy, link);
+    } else {
+      row.append(copy, statusPill("FAILED"));
+    }
+    backupList.append(row);
+  });
+  if (!state.backups.length) backupList.append(el("div", "empty-state", "尚无本地备份"));
+}
+
+function selectedCleanupCategories() {
+  return $$('input[name="cleanup-category"]:checked').map((input) => input.value);
 }
 
 function renderPreflight() {
@@ -1653,6 +1717,22 @@ $("#create-project-form").addEventListener("submit", async (event) => {
   } catch (error) { toast(error.message, true); }
 });
 
+$("#project-import").addEventListener("change", async (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+  event.target.disabled = true;
+  try {
+    const result = await uploadBinary("/api/v1/projects/import", file, () => {});
+    await Promise.all([loadProjects(result.project.id), loadRuns()]);
+    toast(`项目已导入；${result.inspection_submissions.length} 个模型检查已入队`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    event.target.value = "";
+    event.target.disabled = false;
+  }
+});
+
 $("#model-file").addEventListener("change", (event) => { $("#model-file-label").textContent = event.target.files[0]?.name || "上传后由隔离 Runner 解析结构和兼容性"; });
 $("#model-upload-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1761,6 +1841,67 @@ $("#refresh-all-runs").addEventListener("click", () => loadRuns().catch((error) 
 $("#run-filter").addEventListener("change", renderAllRuns);
 $("#run-search").addEventListener("input", renderAllRuns);
 $$(".topnav-item").forEach((button) => button.addEventListener("click", () => showView(button.dataset.view)));
+
+$("#refresh-maintenance").addEventListener("click", () => loadMaintenance().catch((error) => toast(error.message, true)));
+$$('input[name="cleanup-category"]').forEach((input) => input.addEventListener("change", () => {
+  state.cleanupPreview = null;
+  $("#execute-cleanup").disabled = true;
+  $("#cleanup-total").textContent = "选项已变化，请重新预览";
+}));
+$("#cleanup-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const categories = selectedCleanupCategories();
+  if (!categories.length) return toast("请至少选择一个清理类别", true);
+  try {
+    const preview = await api("/api/v1/maintenance/cleanup-preview", {
+      method: "POST", body: JSON.stringify({categories}),
+    });
+    state.cleanupPreview = preview;
+    $("#cleanup-total").textContent = `${preview.candidate_count} 项 · ${formatBytes(preview.reclaimable_bytes)}`;
+    $("#execute-cleanup").disabled = !preview.can_execute || preview.candidate_count === 0;
+    toast(preview.can_execute ? "清理预览已生成，有效期 5 分钟" : preview.blocked_reason, !preview.can_execute);
+  } catch (error) { toast(error.message, true); }
+});
+$("#execute-cleanup").addEventListener("click", async () => {
+  const preview = state.cleanupPreview;
+  if (!preview) return;
+  if (!window.confirm(`确认删除预览中的 ${preview.candidate_count} 项可再生数据（${formatBytes(preview.reclaimable_bytes)}）？`)) return;
+  const button = $("#execute-cleanup"); button.disabled = true;
+  try {
+    const result = await api("/api/v1/maintenance/cleanup", {
+      method: "POST",
+      headers: {"X-Confirm-Cleanup": preview.confirmation_token},
+      body: JSON.stringify({categories: preview.categories}),
+    });
+    state.cleanupPreview = null;
+    await loadMaintenance();
+    toast(`已安全清理 ${result.deleted_count} 项，回收 ${formatBytes(result.deleted_bytes)}`);
+  } catch (error) { toast(error.message, true); }
+});
+$("#backup-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.submitter; button.disabled = true;
+  try {
+    const backup = await api("/api/v1/maintenance/backups", {
+      method: "POST",
+      body: JSON.stringify({include_runs: $("#backup-runs").checked, include_credentials: $("#backup-credentials").checked}),
+    });
+    await loadMaintenance();
+    toast(`备份 ${backup.filename} 已创建并通过哈希校验`);
+  } catch (error) { toast(error.message, true); } finally { button.disabled = false; }
+});
+$("#backup-import").addEventListener("change", async (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+  event.target.disabled = true;
+  try {
+    const backup = await uploadBinary("/api/v1/maintenance/backups/import", file, () => {});
+    await loadMaintenance();
+    toast(`备份 ${backup.filename} 已逐文件校验并保存`);
+  } catch (error) { toast(error.message, true); } finally {
+    event.target.value = ""; event.target.disabled = false;
+  }
+});
 
 $("#open-device-dialog").addEventListener("click", () => $("#device-dialog").showModal());
 $("#refresh-devices").addEventListener("click", () => loadBoardData().catch((error) => toast(error.message, true)));

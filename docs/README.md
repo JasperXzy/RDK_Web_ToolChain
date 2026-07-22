@@ -13,9 +13,11 @@
 - [ADR-015](./adr/ADR-015-m2-1-calibration-and-release-gate.md)：记录 M2.1 直接 NPY、ZIP 原子导入、真实 opset 边界和 Controller 级 S100/S600 发布门禁。
 - [ADR-016](./adr/ADR-016-m3-verification-comparison-and-optional-gpu.md)：记录 M3 数值验证、多输入、比较、缓存和默认关闭的 GPU 控制面。
 - [ADR-017](./adr/ADR-017-m4-board-validation-security-boundary.md)：记录 M4 加密凭据、固定 SSH Host Key、受限板端命令、任务与清理边界。
+- [ADR-018](./adr/ADR-018-m5-release-maintenance.md)：记录 M5 项目迁移、备份/停服恢复、安全清理、运维命令和非 root 边界。
 - [M2.1 发布检查表](./M2_1_RELEASE_CHECKLIST.md)：记录镜像构建、自动化测试、真实资产门禁与发布判定命令。
 - [M3 发布检查表](./M3_RELEASE_CHECKLIST.md)：记录 CPU 验证/比较/缓存门禁与兼容 GPU 主机补充步骤。
 - [M4 板端发布检查表](./M4_RELEASE_CHECKLIST.md)：记录 S100/S600 SSH/SFTP、`model_info/infer/perf`、负向测试和实机发布判定。
+- [M5 发布检查表](./M5_RELEASE_CHECKLIST.md)：记录项目包往返、备份恢复演练、存储清理、非 root 容器和浏览器门禁。
 
 ## 已确认的核心决策
 

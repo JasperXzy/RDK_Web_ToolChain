@@ -3,6 +3,8 @@ FROM ${OE_BASE_IMAGE}
 
 COPY runner/rdkwt_runner /opt/rdkwt-runner/rdkwt_runner
 
+RUN chmod -R a+rX /opt/rdkwt-runner
+
 ENV HOME=/tmp/rdkwt-home \
     MPLCONFIGDIR=/tmp/matplotlib \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \

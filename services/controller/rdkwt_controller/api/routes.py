@@ -130,6 +130,21 @@ class ProjectUpdateRequest(BaseModel):
     description: str | None = Field(default=None, max_length=4000)
 
 
+class CleanupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    categories: list[
+        Literal["stale_uploads", "generated_exports", "orphan_run_directories", "cache"]
+    ] = Field(min_length=1, max_length=4)
+
+
+class BackupCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    include_runs: bool = True
+    include_credentials: bool = True
+
+
 class CalibrationSetCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -324,6 +339,64 @@ async def preflight(request: Request) -> dict[str, object]:
     return _services(request).system_service.preflight()
 
 
+@router.get("/api/v1/maintenance/storage")
+async def maintenance_storage(request: Request) -> dict[str, object]:
+    return _services(request).maintenance_service.storage()
+
+
+@router.post("/api/v1/maintenance/cleanup-preview")
+async def cleanup_preview(payload: CleanupRequest, request: Request) -> dict[str, object]:
+    return _services(request).maintenance_service.cleanup_preview(payload.categories)
+
+
+@router.post("/api/v1/maintenance/cleanup")
+async def cleanup(
+    payload: CleanupRequest,
+    request: Request,
+    confirmation: Annotated[str, Header(alias="X-Confirm-Cleanup")],
+) -> dict[str, object]:
+    return _services(request).maintenance_service.cleanup(
+        token=confirmation,
+        categories=payload.categories,
+    )
+
+
+@router.get("/api/v1/maintenance/backups")
+async def backups(request: Request) -> list[dict[str, object]]:
+    return _services(request).maintenance_service.list_backups()
+
+
+@router.post("/api/v1/maintenance/backups", status_code=status.HTTP_201_CREATED)
+async def create_backup(payload: BackupCreateRequest, request: Request) -> dict[str, object]:
+    return _services(request).maintenance_service.create_backup(
+        include_runs=payload.include_runs,
+        include_credentials=payload.include_credentials,
+    )
+
+
+@router.post("/api/v1/maintenance/backups/import", status_code=status.HTTP_201_CREATED)
+async def import_backup(request: Request) -> dict[str, object]:
+    return await _services(request).maintenance_service.import_backup(
+        request.stream(), content_length=_content_length(request)
+    )
+
+
+@router.get("/api/v1/maintenance/backups/{filename}")
+async def download_backup(filename: str, request: Request) -> FileResponse:
+    path = _services(request).maintenance_service.backup_file(filename)
+    return FileResponse(path, media_type="application/zip", filename=path.name)
+
+
+@router.get("/api/v1/maintenance/diagnostics")
+async def diagnostics(request: Request) -> Response:
+    payload = _services(request).maintenance_service.diagnostics_json()
+    return Response(
+        content=payload,
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="rdkwt-diagnostics.json"'},
+    )
+
+
 @router.post(
     "/api/v1/system/preflight/runner-smoke-test",
     status_code=status.HTTP_202_ACCEPTED,
@@ -365,9 +438,37 @@ async def create_project(payload: ProjectCreateRequest, request: Request) -> dic
     )
 
 
+@router.post("/api/v1/projects/import", status_code=status.HTTP_201_CREATED)
+async def import_project(request: Request) -> dict[str, object]:
+    services = _services(request)
+    imported = await services.catalog_service.import_project(
+        content_length=_content_length(request), chunks=request.stream()
+    )
+    submissions = []
+    inspection_errors = []
+    for version_id in imported.pop("model_version_ids"):
+        try:
+            submission = services.run_service.submit_model_inspection(model_version_id=version_id)
+            services.orchestrator.enqueue(submission.run_id, submission.attempt)
+            submissions.append(_submission_payload(submission))
+        except (KeyError, RuntimeError, ValueError) as exc:
+            inspection_errors.append({"model_version_id": version_id, "detail": str(exc)})
+    return {
+        **imported,
+        "inspection_submissions": submissions,
+        "inspection_errors": inspection_errors,
+    }
+
+
 @router.get("/api/v1/projects/{project_id}")
 async def project_detail(project_id: str, request: Request) -> dict[str, object]:
     return _services(request).catalog_service.get_project(project_id)
+
+
+@router.get("/api/v1/projects/{project_id}/export")
+async def export_project(project_id: str, request: Request) -> FileResponse:
+    path = _services(request).catalog_service.export_project(project_id)
+    return FileResponse(path, media_type="application/zip", filename=path.name)
 
 
 @router.patch("/api/v1/projects/{project_id}")
@@ -566,7 +667,7 @@ async def delete_device(device_id: str, request: Request) -> dict[str, object]:
 
 @router.post("/api/v1/devices/{device_id}/probe")
 async def probe_device(device_id: str, request: Request) -> dict[str, object]:
-    return await asyncio.to_thread(_services(request).device_service.probe, device_id)
+    return await _services(request).device_service.probe_async(device_id)
 
 
 @router.get("/api/v1/board-runs")

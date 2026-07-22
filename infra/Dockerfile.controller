@@ -1,10 +1,20 @@
 FROM python:3.11-slim
 
+ARG RDKWT_UID=10001
+ARG RDKWT_GID=10001
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DEFAULT_TIMEOUT=120
 
 WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates passwd \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid "${RDKWT_GID}" rdkwt \
+    && useradd --uid "${RDKWT_UID}" --gid rdkwt --home-dir /nonexistent \
+       --no-create-home --shell /usr/sbin/nologin rdkwt
 
 COPY pyproject.toml /app/pyproject.toml
 COPY requirements/controller.txt /app/requirements/controller.txt
@@ -16,8 +26,18 @@ COPY packages/contracts /app/packages/contracts
 COPY services/controller /app/services/controller
 COPY runner /app/runner
 COPY profiles /app/profiles
+COPY infra/controller-entrypoint.sh /usr/local/bin/rdkwt-controller-entrypoint
+COPY infra/volume-init.sh /usr/local/bin/rdkwt-volume-init
 
-RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation .
+RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation . \
+    && chmod 0755 /usr/local/bin/rdkwt-controller-entrypoint \
+       /usr/local/bin/rdkwt-volume-init \
+    && chmod -R a+rX /app \
+    && mkdir -p /state /assets /runs /cache \
+    && chown rdkwt:rdkwt /state /assets /runs /cache
 
 EXPOSE 8080
+VOLUME ["/state", "/assets", "/runs", "/cache"]
+USER rdkwt:rdkwt
+ENTRYPOINT ["/usr/local/bin/rdkwt-controller-entrypoint"]
 CMD ["rdkwt-controller"]

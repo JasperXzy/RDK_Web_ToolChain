@@ -75,6 +75,7 @@ def test_container_spec_has_fixed_security_boundary(settings: Settings) -> None:
     assert options["command"] == ["--request", f"/runs/{run_id}/attempts/1/request.json"]
     assert options["network_disabled"] is True
     assert options["read_only"] is True
+    assert options["user"] == f"{settings.runner_uid}:{settings.runner_gid}"
     assert options["cap_drop"] == ["ALL"]
     assert options["security_opt"] == ["no-new-privileges"]
     assert "entrypoint" not in options

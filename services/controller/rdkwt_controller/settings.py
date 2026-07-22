@@ -69,8 +69,13 @@ class Settings:
     runner_memory: str = "8g"
     runner_nano_cpus: int = 4_000_000_000
     runner_pids_limit: int = 512
+    runner_uid: int = 10_001
+    runner_gid: int = 10_001
     stop_timeout_seconds: int = 15
     max_upload_bytes: int = 2 * 1024 * 1024 * 1024
+    max_backup_bytes: int = 8 * 1024 * 1024 * 1024
+    max_backup_uncompressed_bytes: int = 32 * 1024 * 1024 * 1024
+    max_backup_entries: int = 200_000
     min_free_bytes: int = 512 * 1024 * 1024
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost", "[::1]")
     board_connect_timeout_seconds: int = 10
@@ -107,8 +112,15 @@ class Settings:
             runner_memory=os.environ.get("RDKWT_RUNNER_MEMORY", "8g"),
             runner_nano_cpus=_positive_int("RDKWT_RUNNER_NANO_CPUS", 4_000_000_000),
             runner_pids_limit=_positive_int("RDKWT_RUNNER_PIDS_LIMIT", 512),
+            runner_uid=_positive_int("RDKWT_RUNNER_UID", 10_001),
+            runner_gid=_positive_int("RDKWT_RUNNER_GID", 10_001),
             stop_timeout_seconds=_positive_int("RDKWT_STOP_TIMEOUT_SECONDS", 15),
             max_upload_bytes=_positive_int("RDKWT_MAX_UPLOAD_BYTES", 2 * 1024 * 1024 * 1024),
+            max_backup_bytes=_positive_int("RDKWT_MAX_BACKUP_BYTES", 8 * 1024 * 1024 * 1024),
+            max_backup_uncompressed_bytes=_positive_int(
+                "RDKWT_MAX_BACKUP_UNCOMPRESSED_BYTES", 32 * 1024 * 1024 * 1024
+            ),
+            max_backup_entries=_positive_int("RDKWT_MAX_BACKUP_ENTRIES", 200_000),
             min_free_bytes=_positive_int("RDKWT_MIN_FREE_DISK_BYTES", 512 * 1024 * 1024),
             allowed_hosts=_allowed_hosts(),
             board_connect_timeout_seconds=_positive_int("RDKWT_BOARD_CONNECT_TIMEOUT_SECONDS", 10),
@@ -151,6 +163,8 @@ class Settings:
             self.effective_cache_dir,
             self.secrets_dir,
             self.board_runs_dir,
+            self.backups_dir,
+            self.project_exports_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
         self.secrets_dir.chmod(0o700)
@@ -166,3 +180,11 @@ class Settings:
     @property
     def board_runs_dir(self) -> Path:
         return self.runs_dir / "board-runs"
+
+    @property
+    def backups_dir(self) -> Path:
+        return self.state_dir / "backups"
+
+    @property
+    def project_exports_dir(self) -> Path:
+        return self.state_dir / "project-exports"

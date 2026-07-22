@@ -2215,6 +2215,32 @@ Host Key 必须显式确认。当前未提供真实板卡或凭据，因此 S100
 [ADR-017](./adr/ADR-017-m4-board-validation-security-boundary.md) 与
 [M4 发布检查表](./M4_RELEASE_CHECKLIST.md)。
 
+### M5：发布与维护加固
+
+交付：
+
+- 维护页展示状态、资产、任务、缓存卷占用与可回收候选。
+- 清理采用“预览 → 五分钟一次性令牌 → 重新核对 → 执行”，活动任务期间禁止执行；范围仅为
+  过期上传暂存、可再生导出、孤立 UUID 任务目录和缓存，绝不自动选择成功 HBM。
+- 系统备份使用 SQLite Backup API 取得一致快照，逐文件写入大小和 SHA-256；资产默认包含，
+  任务数据与加密凭据可选，缓存永不包含。上传、下载和离线恢复共享同一套 ZIP 安全校验。
+- 恢复必须由 `scripts/rdkwt.sh restore <filename>` 停服执行，恢复前再创建完整安全备份；各卷
+  在自身文件系统内分阶段交换，失败时回滚已交换路径，启动时再执行 Alembic。
+- 项目包只包含项目元数据、模型与校准数据，明确排除任务、产物和凭据；导入不继承模型
+  `READY`，而是重新提交隔离检查。
+- `scripts/rdkwt.sh` 提供 doctor/install/up/down/backup/restore/upgrade/diagnostics；一次性
+  `volume-init` 服务以最小能力完成卷所有权迁移，Controller 随后直接以可配置 UID/GID 的
+  `rdkwt` 用户、只读根文件系统和零 Capability 运行。Docker Socket 仍等价于宿主高权限，
+  因此本机监听、固定入口和参数白名单保持不变。
+
+退出条件：项目包往返、备份哈希篡改拒绝、SQLite 恢复与恢复前安全备份、清理过期/令牌失效/
+计划变化、维护 API、Shell/JavaScript 语法和 Headless Chrome 初始化均有自动化门禁；Docker
+镜像以非 root UID 运行并可访问 Named Volume 和 Docker Socket。
+
+实施状态（2026-07-22）：M5 软件实现与临时数据恢复演练已完成。开发机 GPU 继续关闭；维护
+能力不调用 OE 或 GPU。详细决策与复跑步骤见 [ADR-018](./adr/ADR-018-m5-release-maintenance.md)
+和 [M5 发布检查表](./M5_RELEASE_CHECKLIST.md)。
+
 ## 32. Architecture Decision Records 摘要
 
 后续可将以下决策拆为独立 ADR：
@@ -2238,6 +2264,7 @@ Host Key 必须显式确认。当前未提供真实板卡或凭据，因此 S100
 | ADR-015 | 校准输入与真实发布门禁 |
 | ADR-016 | 数值验证、多输入、比较、缓存与可选 GPU |
 | ADR-017 | 板端验证、加密凭据与固定 SSH Host Key |
+| ADR-018 | 项目迁移、备份恢复、安全清理与非 root 发布运维 |
 
 ## 33. 仍需通过 Spike 验证的技术点
 
@@ -2259,10 +2286,12 @@ M3 已完成 CPU HBRuntime/`hb_verifier` 的真实 S100/S600 门禁；多输入�
 2. GPU Runner 的固定 DeviceRequest 与共享内存构建参数已有单元覆盖，实际 Driver/Toolkit/
    OE 组合和 GPU Smoke 仍待兼容主机验证。
 3. `hb_compile` 收到 SIGTERM 后的退出行为及中间文件完整性。
-4. Controller 非 root 用户访问 Docker Socket 和 Named Volume 的 UID/GID 策略。
-5. 任务容器生成文件的所有权回收方式。
-6. 大模型是否需要在 P0 即支持分片和断点续传；当前实现为带大小上限的流式上传。
-7. 静态性能 HTML 在 sandbox iframe 中的可用程度。
+4. 大模型是否需要支持分片和断点续传；当前实现为带大小上限的流式上传。
+5. 静态性能 HTML 在 sandbox iframe 中的可用程度。
+
+Controller 非 root、Docker Socket 补充组和 Named Volume 一次性所有权迁移已在 M5 固化；
+任务容器仍只写 Named Volume，浏览器下载避免依赖宿主 Bind Mount 文件所有权。结论见
+[ADR-018](./adr/ADR-018-m5-release-maintenance.md)。
 
 Spike 结果应更新本设计并形成 ADR，而不是只保存在临时脚本中。
 

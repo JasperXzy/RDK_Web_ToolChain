@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import re
+import threading
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path, PurePath, PurePosixPath
@@ -142,34 +144,97 @@ class DeviceService:
         return {"id": device_id, "deleted": True}
 
     def probe(self, device_id: str) -> dict[str, Any]:
+        device, credential = self._probe_inputs(device_id)
+        try:
+            result = self._gateway.probe(device, credential)
+        except (BoardGatewayError, CredentialStoreError) as exc:
+            self._record_probe_failure(device_id, exc)
+        return self._record_probe_success(device_id, device, result)
+
+    async def probe_async(self, device_id: str) -> dict[str, Any]:
+        # Keep SQLite and Secret Store access on the request thread. Only the blocking
+        # SSH/SFTP exchange crosses into the executor, so SQLite pooled connections are
+        # never used from a different thread.
+        device, credential = self._probe_inputs(device_id)
+        try:
+            result = await self._probe_gateway_async(device, credential)
+        except (BoardGatewayError, CredentialStoreError) as exc:
+            self._record_probe_failure(device_id, exc)
+        return self._record_probe_success(device_id, device, result)
+
+    async def _probe_gateway_async(
+        self, device: dict[str, Any], credential: dict[str, Any]
+    ) -> dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        completion: asyncio.Future[dict[str, Any]] = loop.create_future()
+
+        def succeed(result: dict[str, Any]) -> None:
+            if not completion.done():
+                completion.set_result(result)
+
+        def fail(exc: BaseException) -> None:
+            if not completion.done():
+                completion.set_exception(exc)
+
+        def execute() -> None:
+            try:
+                result = self._gateway.probe(device, credential)
+            except BaseException as exc:
+                loop.call_soon_threadsafe(fail, exc)
+            else:
+                loop.call_soon_threadsafe(succeed, result)
+
+        threading.Thread(
+            target=execute,
+            name="rdkwt-device-probe",
+            daemon=True,
+        ).start()
+        return await completion
+
+    def _probe_inputs(self, device_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         device = self.get(device_id)
         try:
             credential = self._credentials.get(self.repository.credential_ref(device_id))
-            result = self._gateway.probe(device, credential)
-            detected = result.get("detected_platform")
-            if detected is None:
-                raise BoardGatewayError(
+        except CredentialStoreError as exc:
+            self._record_probe_failure(device_id, exc)
+        return device, credential
+
+    def _record_probe_success(
+        self, device_id: str, device: dict[str, Any], result: dict[str, Any]
+    ) -> dict[str, Any]:
+        detected = result.get("detected_platform")
+        if detected is None:
+            self._record_probe_failure(
+                device_id,
+                BoardGatewayError(
                     "BOARD_PLATFORM_UNKNOWN", "unable to identify the board platform"
-                )
-            if detected != device["platform"]:
-                raise BoardGatewayError(
+                ),
+            )
+        if detected != device["platform"]:
+            self._record_probe_failure(
+                device_id,
+                BoardGatewayError(
                     "BOARD_PLATFORM_MISMATCH",
                     f"configured platform {device['platform']} does not match detected {detected}",
-                )
-            return self.repository.record_probe_success(
-                device_id, result=result, detected_platform=detected
+                ),
             )
-        except (BoardGatewayError, CredentialStoreError) as exc:
-            message = str(exc)
-            self.repository.record_probe_failure(device_id, error=message)
-            if isinstance(exc, BoardGatewayError):
-                raise BoardError(
-                    exc.code,
-                    message,
-                    409 if exc.code.startswith("HOST_KEY_") else 422,
-                    observed_fingerprint=exc.observed_fingerprint,
-                ) from exc
-            raise BoardError("DEVICE_CREDENTIAL_UNAVAILABLE", message, 422) from exc
+        return self.repository.record_probe_success(
+            device_id, result=result, detected_platform=detected
+        )
+
+    def _record_probe_failure(
+        self, device_id: str, exc: BoardGatewayError | CredentialStoreError
+    ) -> None:
+        message = str(exc)
+        self.repository.record_probe_failure(device_id, error=message)
+        if isinstance(exc, BoardGatewayError):
+            raise BoardError(
+                exc.code,
+                message,
+                409 if exc.code.startswith("HOST_KEY_") else 422,
+                observed_fingerprint=exc.observed_fingerprint,
+            ) from exc
+        raise BoardError("DEVICE_CREDENTIAL_UNAVAILABLE", message, 422) from exc
 
     @staticmethod
     def _validate_fingerprint(value: str | None) -> None:
