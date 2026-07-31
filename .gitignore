@@ -1,4 +1,5 @@
 .coverage
+.codex/
 .pytest_cache/
 .rdkwt/
 .venv/

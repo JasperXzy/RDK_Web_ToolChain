@@ -41,7 +41,7 @@ class FakeDockerClient:
 
 @pytest.mark.integration
 @pytest.mark.release
-def test_headless_browser_initializes_m5_workbench(settings, tmp_path) -> None:
+def test_headless_browser_initializes_workbench(settings, tmp_path) -> None:
     if os.environ.get("RDKWT_RUN_BROWSER_TESTS") != "1":
         pytest.skip("set RDKWT_RUN_BROWSER_TESTS=1 to run the headless browser gate")
     chrome = shutil.which("google-chrome") or shutil.which("chromium")
@@ -87,7 +87,9 @@ def test_headless_browser_initializes_m5_workbench(settings, tmp_path) -> None:
         thread.join(timeout=5)
         listener.close()
 
-    assert "M5 · RELEASE &amp; MAINTENANCE" in result.stdout
+    assert "模型转换，" in result.stdout
+    assert "M5 · 发布与维护" not in result.stdout
+    assert "Recommended action" not in result.stdout
     assert 'id="maintenance-view"' in result.stdout
     assert "正在检查环境" not in result.stdout
     assert "环境可用" in result.stdout

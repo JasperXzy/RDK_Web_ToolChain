@@ -37,19 +37,279 @@ const state = {
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
+const customSelects = new Map();
 const el = (tag, className, text) => {
   const node = document.createElement(tag);
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
 };
+const scrollBehavior = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+
+function customSelectFocusTarget(control) {
+  return customSelects.get(control?.id)?.trigger || control;
+}
+
+function closeCustomSelect(instance) {
+  if (!instance) return;
+  instance.root.classList.remove("is-open");
+  instance.root.classList.remove("opens-upward");
+  instance.menu.classList.add("hidden");
+  instance.menu.style.removeProperty("max-height");
+  instance.trigger.setAttribute("aria-expanded", "false");
+  instance.trigger.removeAttribute("aria-activedescendant");
+  instance.activeIndex = -1;
+  instance.menu.querySelectorAll(".is-active").forEach((item) => item.classList.remove("is-active"));
+}
+
+function positionCustomSelect(instance) {
+  instance.root.classList.remove("opens-upward");
+  instance.menu.style.removeProperty("max-height");
+  const triggerRect = instance.trigger.getBoundingClientRect();
+  const mobileNavigation = $(".mobile-nav");
+  const navigationVisible = mobileNavigation && getComputedStyle(mobileNavigation).display !== "none";
+  const viewportBottom = navigationVisible ? mobileNavigation.getBoundingClientRect().top : window.innerHeight;
+  const desiredHeight = Math.min(instance.menu.scrollHeight, 240);
+  const availableBelow = Math.max(0, viewportBottom - triggerRect.bottom - 8);
+  const availableAbove = Math.max(0, triggerRect.top - 8);
+  const opensUpward = availableBelow < desiredHeight && availableAbove > availableBelow;
+  instance.root.classList.toggle("opens-upward", opensUpward);
+  const availableHeight = opensUpward ? availableAbove : availableBelow;
+  instance.menu.style.maxHeight = `${Math.max(48, Math.min(240, availableHeight))}px`;
+}
+
+function closeCustomSelects(except = null) {
+  customSelects.forEach((instance) => {
+    if (instance !== except) closeCustomSelect(instance);
+  });
+}
+
+function customSelectEnabledIndexes(instance) {
+  return [...instance.select.options]
+    .map((option, index) => ({option, index}))
+    .filter(({option}) => !option.disabled && option.value !== "")
+    .map(({index}) => index);
+}
+
+function setCustomSelectActive(instance, index) {
+  instance.activeIndex = index;
+  instance.menu.querySelectorAll(".custom-select-option").forEach((item) => {
+    item.classList.toggle("is-active", Number(item.dataset.optionIndex) === index);
+  });
+  const active = instance.menu.querySelector(`[data-option-index="${index}"]`);
+  if (!active) {
+    instance.trigger.removeAttribute("aria-activedescendant");
+    return;
+  }
+  instance.trigger.setAttribute("aria-activedescendant", active.id);
+  const activeTop = active.offsetTop;
+  const activeBottom = activeTop + active.offsetHeight;
+  if (activeTop < instance.menu.scrollTop) instance.menu.scrollTop = activeTop;
+  else if (activeBottom > instance.menu.scrollTop + instance.menu.clientHeight) {
+    instance.menu.scrollTop = activeBottom - instance.menu.clientHeight;
+  }
+}
+
+function moveCustomSelectActive(instance, direction) {
+  const indexes = customSelectEnabledIndexes(instance);
+  if (!indexes.length) return;
+  const current = indexes.indexOf(instance.activeIndex);
+  const next = current < 0
+    ? (direction > 0 ? 0 : indexes.length - 1)
+    : (current + direction + indexes.length) % indexes.length;
+  setCustomSelectActive(instance, indexes[next]);
+}
+
+function selectCustomOption(instance, index) {
+  const option = instance.select.options[index];
+  if (!option || option.disabled || option.value === "") return;
+  instance.select.value = option.value;
+  instance.select.dispatchEvent(new Event("change", {bubbles: true}));
+  closeCustomSelect(instance);
+  instance.trigger.focus({preventScroll: true});
+}
+
+function refreshCustomSelect(control) {
+  const instance = customSelects.get(typeof control === "string" ? control : control?.id);
+  if (!instance) return;
+  const options = [...instance.select.options];
+  const selected = options.find((option) => option.selected) || options[0];
+  instance.value.textContent = selected?.dataset.label || selected?.textContent || "请选择";
+  instance.trigger.disabled = instance.select.disabled;
+  instance.menu.replaceChildren();
+  options.forEach((option, index) => {
+    if (option.value === "" && option.disabled) return;
+    const item = el("button", "custom-select-option");
+    item.type = "button";
+    item.id = `${instance.select.id}-option-${index}`;
+    item.dataset.optionIndex = String(index);
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(option.selected));
+    item.setAttribute("aria-disabled", String(option.disabled));
+    item.tabIndex = -1;
+    item.disabled = option.disabled;
+    const copy = el("span", "custom-select-option-copy");
+    copy.append(el("strong", "", option.dataset.label || option.textContent));
+    if (option.dataset.description) copy.append(el("small", "", option.dataset.description));
+    item.append(copy, el("span", "custom-select-check", "✓"));
+    item.addEventListener("click", () => selectCustomOption(instance, index));
+    instance.menu.append(item);
+  });
+  if (!instance.menu.children.length) {
+    instance.menu.append(el("div", "custom-select-empty", selected?.textContent || "暂无可选项"));
+  }
+}
+
+function openCustomSelect(instance, direction = 1) {
+  closeCustomSelects(instance);
+  refreshCustomSelect(instance.select);
+  instance.root.classList.add("is-open");
+  instance.menu.classList.remove("hidden");
+  instance.trigger.setAttribute("aria-expanded", "true");
+  positionCustomSelect(instance);
+  const selectedIndex = instance.select.selectedIndex;
+  const indexes = customSelectEnabledIndexes(instance);
+  const activeIndex = indexes.includes(selectedIndex)
+    ? selectedIndex
+    : (direction > 0 ? indexes[0] : indexes[indexes.length - 1]);
+  if (activeIndex !== undefined) setCustomSelectActive(instance, activeIndex);
+}
+
+function handleCustomSelectKeydown(event, instance) {
+  const open = instance.trigger.getAttribute("aria-expanded") === "true";
+  if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+    event.preventDefault();
+    if (!open) openCustomSelect(instance, event.key === "ArrowDown" ? 1 : -1);
+    else moveCustomSelectActive(instance, event.key === "ArrowDown" ? 1 : -1);
+    return;
+  }
+  if (["Home", "End"].includes(event.key) && open) {
+    event.preventDefault();
+    const indexes = customSelectEnabledIndexes(instance);
+    if (indexes.length) setCustomSelectActive(instance, event.key === "Home" ? indexes[0] : indexes[indexes.length - 1]);
+    return;
+  }
+  if (["Enter", " "].includes(event.key)) {
+    event.preventDefault();
+    if (!open) openCustomSelect(instance);
+    else if (instance.activeIndex >= 0) selectCustomOption(instance, instance.activeIndex);
+    return;
+  }
+  if (event.key === "Escape" && open) {
+    event.preventDefault();
+    closeCustomSelect(instance);
+  } else if (event.key === "Tab") {
+    closeCustomSelect(instance);
+  }
+}
+
+function initializeCustomSelects() {
+  $$('[data-custom-select]').forEach((root) => {
+    const select = root.querySelector("select");
+    const trigger = root.querySelector(".custom-select-trigger");
+    const menu = root.querySelector(".custom-select-menu");
+    const value = root.querySelector(".custom-select-value");
+    const instance = {root, select, trigger, menu, value, activeIndex: -1};
+    customSelects.set(select.id, instance);
+    trigger.addEventListener("click", () => {
+      if (trigger.getAttribute("aria-expanded") === "true") closeCustomSelect(instance);
+      else openCustomSelect(instance);
+    });
+    trigger.addEventListener("keydown", (event) => handleCustomSelectKeydown(event, instance));
+    select.addEventListener("change", () => refreshCustomSelect(select));
+    refreshCustomSelect(select);
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest("[data-custom-select]")) closeCustomSelects();
+  });
+  const repositionOpenSelects = () => {
+    customSelects.forEach((instance) => {
+      if (instance.trigger.getAttribute("aria-expanded") === "true") positionCustomSelect(instance);
+    });
+  };
+  window.addEventListener("resize", repositionOpenSelects);
+  window.addEventListener("scroll", repositionOpenSelects, {passive: true});
+}
 
 function toast(message, error = false) {
   const node = $("#toast");
   node.textContent = message;
   node.className = `toast show${error ? " error" : ""}`;
+  node.setAttribute("role", error ? "alert" : "status");
+  node.setAttribute("aria-live", error ? "assertive" : "polite");
+  node.setAttribute("aria-atomic", "true");
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => { node.className = "toast"; }, 3800);
+}
+
+function setButtonBusy(button, busy, label = "处理中…") {
+  if (!button) return;
+  if (busy) {
+    if (!button.dataset.idleLabel) button.dataset.idleLabel = button.textContent.trim();
+    button.textContent = label;
+    button.disabled = true;
+    button.classList.add("is-loading");
+    button.setAttribute("aria-busy", "true");
+    return;
+  }
+  button.textContent = button.dataset.idleLabel || button.textContent;
+  delete button.dataset.idleLabel;
+  button.disabled = false;
+  button.classList.remove("is-loading");
+  button.removeAttribute("aria-busy");
+}
+
+function setControlError(control, regionId, invalid) {
+  if (!control) return;
+  const describedBy = new Set((control.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean));
+  if (invalid) {
+    describedBy.add(regionId);
+    control.setAttribute("aria-invalid", "true");
+  } else {
+    describedBy.delete(regionId);
+    control.removeAttribute("aria-invalid");
+  }
+  if (describedBy.size) control.setAttribute("aria-describedby", [...describedBy].join(" "));
+  else control.removeAttribute("aria-describedby");
+}
+
+function clearFormError(regionSelector) {
+  const region = $(regionSelector);
+  if (!region) return;
+  region.classList.add("hidden");
+  region.textContent = "";
+  const form = region.closest("form");
+  if (form) form.querySelectorAll('[aria-invalid="true"]').forEach((control) => setControlError(control, region.id, false));
+}
+
+function showFormError(regionSelector, message, controlSelector = null) {
+  const region = $(regionSelector);
+  if (!region) return toast(message, true);
+  clearFormError(regionSelector);
+  region.textContent = message;
+  region.classList.remove("hidden");
+  const control = typeof controlSelector === "string" ? $(controlSelector) : controlSelector;
+  if (control) {
+    setControlError(control, region.id, true);
+    const focusTarget = customSelectFocusTarget(control);
+    if (focusTarget !== control) setControlError(focusTarget, region.id, true);
+    focusTarget.focus({preventScroll: true});
+    focusTarget.scrollIntoView({block: "center", behavior: scrollBehavior()});
+  } else {
+    region.focus?.({preventScroll: true});
+  }
+}
+
+function clearWizardError() {
+  clearFormError("#wizard-error-summary");
+}
+
+function showWizardError(message, step = state.wizardStep) {
+  const target = {
+    1: "#wizard-model", 2: "#runner-mode", 3: "#target-shape",
+    4: "#wizard-calibration", 5: "#output-prefix", 6: "#confirm-snapshot",
+  }[step];
+  showFormError("#wizard-error-summary", message, target);
 }
 
 async function api(path, options = {}) {
@@ -123,11 +383,24 @@ function statusPill(status) {
   return node;
 }
 
+function runState(status, stage) {
+  const node = el("div", "run-state");
+  node.append(statusPill(status));
+  if (stage && stage !== status) node.append(el("small", "run-stage", stage));
+  return node;
+}
+
 function setProgress(selector, ratio) {
   const node = $(selector);
+  const normalized = Math.max(0, Math.min(1, ratio));
   node.classList.remove("hidden");
-  node.firstElementChild.style.width = `${Math.max(0, Math.min(1, ratio)) * 100}%`;
-  if (ratio >= 1) setTimeout(() => node.classList.add("hidden"), 700);
+  node.setAttribute("aria-valuenow", String(Math.round(normalized * 100)));
+  node.firstElementChild.style.width = `${normalized * 100}%`;
+  if (ratio >= 1) setTimeout(() => {
+    node.classList.add("hidden");
+    node.setAttribute("aria-valuenow", "0");
+    node.firstElementChild.style.width = "0%";
+  }, 700);
 }
 
 function runKindLabel(kind) {
@@ -149,6 +422,7 @@ function renderProjectList() {
   for (const project of state.projects) {
     const button = el("button", `project-item${state.currentProject?.id === project.id ? " active" : ""}`);
     button.type = "button";
+    if (state.currentProject?.id === project.id) button.setAttribute("aria-current", "true");
     button.append(
       el("strong", "", project.name),
       el("span", "", `${project.model_count} 模型 · ${project.run_count || 0} 任务`),
@@ -192,6 +466,94 @@ function calibrationSourceLabel(sourceType) {
   return {npy: "直接 NPY", npy_multi: "多输入 NPY ZIP", images: "图片"}[sourceType] || sourceType;
 }
 
+function projectConversionReadiness() {
+  const models = projectModels();
+  const calibrations = projectCalibrations();
+  const readyModels = models.filter(({version}) => version.compatibility_status === "READY");
+  const readyCalibrations = calibrations.filter(({version}) => version.status === "READY" && version.sample_count >= 20);
+  if (!readyModels.length) {
+    const inspecting = models.some(({version}) => ["INSPECTING", "PENDING_INSPECTION"].includes(version.compatibility_status));
+    return {
+      ready: false,
+      action: "model",
+      title: inspecting ? "等待模型检查通过" : "上传并检查第一个 ONNX 模型",
+      description: inspecting
+        ? "模型仍在隔离 Runner 中检查；通过后才能创建转换"
+        : "转换只接受 compatibility_status=READY 的模型版本",
+      buttonLabel: inspecting ? "查看模型状态" : "上传模型",
+    };
+  }
+  if (!readyCalibrations.length) {
+    const draft = calibrations.find(({version}) => version.status === "DRAFT");
+    if (draft?.version.sample_count >= 20) {
+      return {
+        ready: false,
+        action: "finalize-calibration",
+        versionId: draft.version.id,
+        title: "冻结已满足数量的校准版本",
+        description: `${draft.calibrationSet.name} 已有 ${draft.version.sample_count} 份样本；定稿后即可用于标准转换`,
+        buttonLabel: "前往定稿",
+      };
+    }
+    if (draft) {
+      const remaining = Math.max(0, 20 - draft.version.sample_count);
+      return {
+        ready: false,
+        action: "calibration",
+        versionId: draft.version.id,
+        title: "补齐校准样本",
+        description: `${draft.calibrationSet.name} 当前 ${draft.version.sample_count} 份，至少还需 ${remaining} 份才能冻结`,
+        buttonLabel: "上传校准样本",
+      };
+    }
+    return {
+      ready: false,
+      action: "calibration-create",
+      title: "创建校准集草稿",
+      description: "准备 20–100 份代表性样本，上传并冻结后才能创建标准转换",
+      buttonLabel: "新建校准集",
+    };
+  }
+  return {
+    ready: true,
+    action: "wizard",
+    title: "转换前置条件已满足",
+    description: `${readyModels.length} 个 READY 模型 · ${readyCalibrations.length} 个可用校准版本，可以进入六步向导`,
+    buttonLabel: "开始新转换",
+  };
+}
+
+function projectHasSuccessfulConversion() {
+  return state.runs.some((run) =>
+    run.project_id === state.currentProject?.id
+      && run.kind === "CONVERSION"
+      && run.status === "SUCCEEDED",
+  );
+}
+
+function syncProjectActionState() {
+  if (!state.currentProject) return;
+  const readiness = projectConversionReadiness();
+  const wizardButton = $("#open-wizard");
+  const unavailable = !readiness.ready;
+  wizardButton.disabled = false;
+  wizardButton.setAttribute("aria-disabled", String(!readiness.ready));
+  if (unavailable) wizardButton.setAttribute("aria-describedby", "conversion-prereq");
+  else wizardButton.removeAttribute("aria-describedby");
+  $("#conversion-prereq").textContent = unavailable ? `暂不可创建：${readiness.description}` : "";
+  $("#conversion-action").classList.toggle("has-tooltip", unavailable);
+  const nextAction = $("#project-next-action");
+  const completed = projectHasSuccessfulConversion();
+  nextAction.classList.toggle("hidden", completed);
+  if (completed) return;
+  $("#next-action-title").textContent = readiness.title;
+  const nextButton = $("#next-action-button");
+  nextButton.textContent = readiness.buttonLabel;
+  nextButton.dataset.action = readiness.action;
+  nextButton.dataset.versionId = readiness.versionId || "";
+  nextButton.className = `button ${readiness.ready ? "primary" : "secondary"}`;
+}
+
 function renderCurrentProject() {
   const project = state.currentProject;
   if (!project) return;
@@ -212,6 +574,7 @@ function renderCurrentProject() {
   renderModels();
   renderCalibrations();
   renderProjectRuns();
+  syncProjectActionState();
 }
 
 function renderModels() {
@@ -258,9 +621,13 @@ function renderCalibrations() {
   const list = $("#calibration-list");
   const versionSelect = $("#calibration-version-select");
   const selected = versionSelect.value;
+  const calibrations = projectCalibrations();
+  const hasDraft = calibrations.some(({version}) => version.status === "DRAFT");
   list.replaceChildren();
-  versionSelect.replaceChildren(new Option("选择校准版本", ""));
-  for (const {calibrationSet, version} of projectCalibrations()) {
+  const placeholder = new Option(hasDraft ? "选择操作版本" : "暂无可编辑草稿", "", true, true);
+  placeholder.disabled = true;
+  versionSelect.replaceChildren(placeholder);
+  for (const {calibrationSet, version} of calibrations) {
     const row = el("div", "asset-row");
     const copy = el("div");
     const warningCount = version.validation_report?.warnings?.length || 0;
@@ -276,36 +643,66 @@ function renderCalibrations() {
     );
     row.append(copy, el("span", `asset-tag${version.status === "DRAFT" ? " draft" : ""}`, version.status));
     list.append(row);
-    const option = new Option(`${calibrationSet.name} · ${sourceLabel} · ${version.sample_count} 份 · ${version.status}`, version.id);
+    const option = new Option(calibrationSet.name, version.id);
+    option.dataset.label = calibrationSet.name;
+    option.dataset.description = `${sourceLabel} · ${version.sample_count} 份 · ${version.status}`;
     option.disabled = version.status !== "DRAFT";
     versionSelect.add(option);
   }
   if ([...versionSelect.options].some((option) => option.value === selected)) versionSelect.value = selected;
-  if (!projectCalibrations().length) list.append(el("div", "empty-state", "新建草稿后可批量上传图片或直接 NPY"));
+  if (!calibrations.length) list.append(el("div", "empty-state", "暂无校准数据集"));
+  refreshCustomSelect(versionSelect);
   syncCalibrationUploadMode();
   populateWizardCalibrations();
 }
 
 function syncCalibrationUploadMode() {
-  const selected = calibrationVersion($("#calibration-version-select").value);
+  const versionSelect = $("#calibration-version-select");
+  refreshCustomSelect(versionSelect);
+  const selected = calibrationVersion(versionSelect.value);
   const sourceType = selected?.source_type || "images";
   const npy = sourceType === "npy";
   const multi = sourceType === "npy_multi";
+  const draftSelected = selected?.status === "DRAFT";
   const sampleInput = $("#sample-files");
+  const sampleLabel = sampleInput.closest("label");
   const uploadButton = $("#sample-upload-form button[type=submit]");
+  const archiveInput = $("#sample-archive");
+  const archiveLabel = archiveInput.closest("label");
+  const finalizeButton = $("#finalize-calibration");
   sampleInput.accept = npy ? ".npy" : ".jpg,.jpeg,.png,.bmp";
-  sampleInput.disabled = multi;
-  sampleInput.required = !multi;
-  uploadButton.disabled = multi;
-  $("#sample-archive").accept = ".zip";
+  sampleInput.disabled = !draftSelected || multi;
+  sampleInput.required = draftSelected && !multi;
+  sampleLabel.classList.toggle("disabled", sampleInput.disabled);
+  sampleLabel.setAttribute("aria-disabled", String(sampleInput.disabled));
+  uploadButton.disabled = !draftSelected || multi;
+  archiveInput.accept = ".zip";
+  archiveInput.disabled = !draftSelected;
+  archiveLabel.classList.toggle("disabled", !draftSelected);
+  archiveLabel.setAttribute("aria-disabled", String(!draftSelected));
+  const canFinalize = draftSelected && selected.sample_count >= 20;
+  finalizeButton.disabled = !canFinalize;
+  finalizeButton.setAttribute("aria-disabled", String(!canFinalize));
   $("#sample-drop-title").textContent = multi
-    ? "请使用 ZIP 导入多输入 NPY"
-    : npy ? "选择直接 NPY 文件" : "选择 JPEG / PNG / BMP";
+    ? "通过 ZIP 导入多输入 NPY"
+    : npy ? "选择 NPY 文件" : selected ? "选择 JPEG / PNG / BMP" : "校准样本";
   $("#sample-file-label").textContent = !selected
-    ? "请先选择一个 DRAFT 校准版本"
+    ? "JPEG / PNG / BMP / NPY / ZIP"
     : multi
       ? "ZIP 必须严格使用 <input_name>/<sample>.npy，且各输入样本名完全对齐"
-      : `可一次选择多份${npy ? " NPY" : "图片"}，按选择顺序登记`;
+      : `支持批量选择${npy ? " NPY" : "图片"}`;
+  const hint = $("#calibration-action-hint");
+  if (!draftSelected) {
+    hint.textContent = "";
+    hint.classList.add("hidden");
+  } else if (selected.sample_count < 20) {
+    hint.textContent = `${selected.sample_count} / 20 份 · 还需 ${20 - selected.sample_count} 份`;
+    hint.classList.remove("hidden");
+  } else {
+    hint.textContent = `${selected.sample_count} 份 · 可定稿冻结`;
+    hint.classList.remove("hidden");
+  }
+  syncProjectActionState();
 }
 
 async function loadRuns() {
@@ -314,6 +711,7 @@ async function loadRuns() {
   renderProjectRuns();
   renderAllRuns();
   populateComparisonRuns();
+  if (state.currentProject) syncProjectActionState();
   const queued = state.runs.filter((run) => run.status === "QUEUED").length;
   const active = state.runs.filter((run) => ACTIVE_STATUSES.has(run.status) && run.status !== "QUEUED").length;
   $("#queue-status").textContent = `队列 ${queued} · 运行 ${active}`;
@@ -328,8 +726,7 @@ function createRunRow(run) {
   const latest = run.attempts[run.attempts.length - 1];
   row.append(
     identity,
-    statusPill(run.status),
-    el("span", "", latest?.stage || run.status),
+    runState(run.status, latest?.stage),
     el("span", "", formatDate(run.created_at)),
     el("span", "run-chevron", "›"),
   );
@@ -342,7 +739,7 @@ function renderProjectRuns() {
   if (!list || !state.currentProject) return;
   list.replaceChildren();
   const runs = state.runs.filter((run) => run.project_id === state.currentProject.id).slice(0, 12);
-  if (!runs.length) return list.append(el("div", "empty-state", "暂无任务；完成模型检查与校准集定稿后即可创建转换。"));
+  if (!runs.length) return list.append(el("div", "empty-state", "暂无任务；完成模型检查与校准集定稿后即可创建转换"));
   runs.forEach((run) => list.append(createRunRow(run)));
 }
 
@@ -428,16 +825,31 @@ function renderComparison(comparison) {
     body.append(row);
   });
   table.append(head, body);
-  root.append(table, el("p", "comparison-note", "高亮行表示任务间存在差异；数值验证指标用于回归判断，不代表最终业务数据集精度。"));
+  root.append(table, el("p", "comparison-note", "高亮行表示任务间存在差异；数值验证指标用于回归判断，不代表最终业务数据集精度"));
 }
 
-function showView(view) {
+function showView(view, focusContent = false) {
   state.currentView = view;
   $("#workspace-view").classList.toggle("hidden", view !== "workspace");
   $("#runs-view").classList.toggle("hidden", view !== "runs");
   $("#devices-view").classList.toggle("hidden", view !== "devices");
   $("#maintenance-view").classList.toggle("hidden", view !== "maintenance");
-  $$(".topnav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+  $$('[data-view]').forEach((button) => {
+    const active = button.dataset.view === view;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  if (focusContent) {
+    const root = $(`#${view}-view`);
+    const heading = [...root.querySelectorAll("h1")].find((node) => !node.closest(".hidden"));
+    if (heading) {
+      heading.setAttribute("tabindex", "-1");
+      requestAnimationFrame(() => heading.focus({preventScroll: false}));
+    } else {
+      $("#main-content").focus();
+    }
+  }
   if (view === "maintenance") loadMaintenance().catch((error) => toast(error.message, true));
 }
 
@@ -470,8 +882,8 @@ function renderMaintenance() {
   });
   const active = state.maintenance?.active_tasks?.total || 0;
   $("#cleanup-note").textContent = active
-    ? `当前有 ${active} 个活动任务；所有任务结束后才允许清理。`
-    : "当前没有活动任务。执行前仍会重新核对文件列表与一次性确认令牌。";
+    ? `当前有 ${active} 个活动任务；所有任务结束后才允许清理`
+    : "当前没有活动任务；执行前仍会重新核对文件列表与一次性确认令牌";
   const backupList = $("#backup-list");
   backupList.replaceChildren();
   state.backups.forEach((backup) => {
@@ -541,7 +953,7 @@ function renderPreflightDialog() {
   const smoke = preflight.details.runner_smoke_test;
   const heading = el("div", "preflight-check");
   const smokeCopy = el("div");
-  smokeCopy.append(el("strong", "", "Runner Smoke Test"), el("small", "", smoke.status === "NOT_RUN" ? "尚未运行；首次打开会自动执行一次受控工具探测。" : `任务 ${smoke.run_id?.slice(0, 8) || "—"} · ${formatDate(smoke.finished_at)}`));
+  smokeCopy.append(el("strong", "", "Runner Smoke Test"), el("small", "", smoke.status === "NOT_RUN" ? "尚未运行；首次打开会自动执行一次受控工具探测" : `任务 ${smoke.run_id?.slice(0, 8) || "—"} · ${formatDate(smoke.finished_at)}`));
   heading.append(el("span", "check-icon", smoke.status === "SUCCEEDED" ? "✓" : "•"), smokeCopy, el("code", "", smoke.status));
   root.append(heading);
   const versions = el("div", "version-grid");
@@ -584,8 +996,27 @@ async function runSmokeTest(showToast = true) {
 }
 
 function showCreateProject() {
+  clearFormError("#project-form-error");
   $("#create-project-form").classList.remove("hidden");
   $("#project-name").focus();
+}
+
+function openProjectEdit() {
+  if (!state.currentProject) return;
+  clearFormError("#project-edit-error");
+  $("#project-edit-name").value = state.currentProject.name;
+  $("#project-edit-description").value = state.currentProject.description || "";
+  $("#project-edit-dialog").showModal();
+  $("#project-edit-name").focus();
+}
+
+function focusProjectControl(selector) {
+  const control = $(selector);
+  if (!control) return;
+  const section = control.closest(".panel") || control;
+  const focusTarget = customSelectFocusTarget(control);
+  section.scrollIntoView({behavior: scrollBehavior(), block: "center"});
+  setTimeout(() => focusTarget.focus({preventScroll: true}), 220);
 }
 
 function populateWizardModels() {
@@ -635,7 +1066,11 @@ function selectProfile(profileId, resetInvalid = false) {
   if (!profile) return;
   const previous = $("#wizard-profile").value;
   $("#wizard-profile").value = profileId;
-  $$(".profile-card").forEach((card) => card.classList.toggle("active", card.dataset.profile === profileId));
+  $$(".profile-card").forEach((card) => {
+    const active = card.dataset.profile === profileId;
+    card.classList.toggle("active", active);
+    card.setAttribute("aria-pressed", String(active));
+  });
   const s600 = profile.platform === "s600";
   $("#core-num").querySelector('option[value="2"]').disabled = !s600;
   $("#l2m-mode").disabled = !s600;
@@ -665,9 +1100,6 @@ function syncRunnerMode() {
   const gpuOption = select.querySelector('option[value="gpu"]');
   gpuOption.disabled = !gpu.available;
   if (!gpu.available && select.value === "gpu") select.value = "cpu";
-  $("#runner-mode-note").textContent = gpu.available
-    ? `GPU Runner 已就绪：${gpu.image?.immutable_id || gpu.image?.reference || "固定镜像"}`
-    : `当前仅使用 CPU。${gpu.message || "GPU Runner 未启用，不影响转换。"}`;
 }
 
 const WIZARD_FIELDS = [
@@ -742,6 +1174,14 @@ function loadWizardDraft() {
 
 function openWizard() {
   if (!state.currentProject) return toast("请先选择项目", true);
+  const readiness = projectConversionReadiness();
+  if (!readiness.ready) {
+    syncProjectActionState();
+    toast(`暂不能创建转换：${readiness.description}`, true);
+    const target = $("#project-next-action").classList.contains("hidden") ? $("#open-wizard") : $("#next-action-button");
+    target.focus();
+    return;
+  }
   populateWizardModels();
   populateWizardCalibrations();
   renderProfileCards();
@@ -751,17 +1191,25 @@ function openWizard() {
 }
 
 function setWizardStep(step) {
+  clearWizardError();
   state.wizardStep = step;
   $$(".wizard-page").forEach((page) => page.classList.toggle("hidden", Number(page.dataset.page) !== step));
   $$("#wizard-steps li").forEach((item) => {
     const itemStep = Number(item.dataset.step);
     item.classList.toggle("active", itemStep === step);
     item.classList.toggle("done", itemStep < step);
+    if (itemStep === step) item.setAttribute("aria-current", "step");
+    else item.removeAttribute("aria-current");
   });
   $("#wizard-back").classList.toggle("hidden", step === 1);
   $("#wizard-next").classList.toggle("hidden", step === 6);
   $("#wizard-submit").classList.toggle("hidden", step !== 6);
   $(".wizard-body").scrollTop = 0;
+  const heading = $(`.wizard-page[data-page="${step}"] h3`);
+  if (heading) {
+    heading.setAttribute("tabindex", "-1");
+    requestAnimationFrame(() => heading.focus({preventScroll: true}));
+  }
 }
 
 function selectedModelVersion() {
@@ -815,7 +1263,7 @@ function renderAdditionalInputs(inputs, draftInputs = null) {
     const values = saved?.name === input.name ? {...defaults, ...saved} : defaults;
     const card = el("div", "input-config-card");
     card.dataset.inputIndex = String(index);
-    card.append(el("h4", "", `Input ${index + 1} · ${input.name}`));
+    card.append(el("h4", "", `输入 ${index + 1} · ${input.name}`));
     const grid = el("div", "form-grid three");
     const name = el("input", "multi-input-name"); name.readOnly = true; name.value = input.name;
     const shape = el("input", "multi-target-shape"); shape.required = true; shape.placeholder = "1,16"; shape.value = values.target_shape;
@@ -906,14 +1354,14 @@ function inputGeometry(input = configuredInputs()[0]) {
 function inputFromControls(controls, index) {
   return {
     name: controls.name.value,
-    target_shape: parseShape(controls.shape, `Input ${index + 1} 目标 Shape`),
+    target_shape: parseShape(controls.shape, `输入 ${index + 1} 目标 Shape`),
     train_type: controls.trainType.value,
     train_layout: controls.trainLayout.value,
     runtime_type: controls.runtimeType.value,
     normalization: {
-      mean: parseNumbers(controls.mean.value, `Input ${index + 1} Mean`),
-      scale: parseNumbers(controls.scale.value, `Input ${index + 1} Scale`),
-      std: parseNumbers(controls.std.value, `Input ${index + 1} Std`),
+      mean: parseNumbers(controls.mean.value, `输入 ${index + 1} Mean`),
+      scale: parseNumbers(controls.scale.value, `输入 ${index + 1} Scale`),
+      std: parseNumbers(controls.std.value, `输入 ${index + 1} Std`),
     },
   };
 }
@@ -1011,7 +1459,7 @@ function validateWizardStep(step) {
   }
   if (step === 5) {
     if (!$("#output-prefix").checkValidity()) throw new Error("输出前缀格式不合法");
-    if ($("#compile-mode").value === "balance" && !$("#balance-factor").checkValidity()) throw new Error("balance 模式需要 0～100 的 Balance factor");
+    if ($("#compile-mode").value === "balance" && !$("#balance-factor").checkValidity()) throw new Error("自定义平衡模式需要 0～100 的平衡因子");
     if (!$("#compare-digits").checkValidity()) throw new Error("比较小数位必须在 1～12 之间");
   }
   if (step === 6 && !$("#confirm-snapshot").checked) throw new Error("请确认冻结配置后再提交");
@@ -1061,7 +1509,7 @@ async function fetchYamlPreview() {
   const warnings = $("#preview-warnings");
   warnings.replaceChildren();
   (preview.warnings || []).forEach((message) => warnings.append(el("div", "warning-item", message)));
-  if (!(preview.warnings || []).length) warnings.append(el("div", "warning-item", "所有 P0 交叉字段和资源完整性检查均已通过。"));
+  if (!(preview.warnings || []).length) warnings.append(el("div", "warning-item", "所有 P0 交叉字段和资源完整性检查均已通过"));
 }
 
 function updateCalibrationSelection(save = true) {
@@ -1070,9 +1518,6 @@ function updateCalibrationSelection(save = true) {
   if (selected) $("#sample-limit").value = Math.min(Math.max(20, Number($("#sample-limit").value) || 20), selected.sample_count);
   $("#image-recipe-fields").classList.toggle("hidden", direct);
   $("#calibration-preview").classList.toggle("npy-mode", direct);
-  $("#calibration-step-copy").textContent = direct
-    ? "直接 NPY 不执行图片 Recipe；提交前会逐输入核对冻结的 Shape、dtype、样本对齐、哈希和有限数值统计。"
-    : "选择冻结的校准版本，并检查第一份样本的中心裁剪结果和归一化统计。";
   renderCalibrationPreview().catch((error) => {
     $("#preview-stats").replaceChildren(el("span", "", `预览失败：${error.message}`));
   });
@@ -1099,7 +1544,7 @@ async function renderCalibrationPreview() {
     statsRoot.replaceChildren();
     const reports = selected.source_type === "npy_multi"
       ? (report.inputs || [])
-      : [{name: "Input 1", shape: report.shape, dtype: report.dtype, first_sample_statistics: report.first_sample_statistics}];
+      : [{name: "输入 1", shape: report.shape, dtype: report.dtype, first_sample_statistics: report.first_sample_statistics}];
     statsRoot.append(keyValue("数据路径", selected.source_type === "npy_multi" ? "多输入 NPY ZIP（样本名已对齐）" : "直接 NPY（无图片 Recipe）"));
     reports.forEach((inputReport) => {
       const statistics = inputReport.first_sample_statistics || {};
@@ -1161,12 +1606,34 @@ async function renderCalibrationPreview() {
 
 function toggleCompileMode() {
   const balance = $("#compile-mode").value === "balance";
-  $("#balance-factor").disabled = !balance;
-  $("#balance-factor").required = balance;
+  const input = $("#balance-factor");
+  if (!input.value) input.value = "50";
+  $("#balance-factor-field").classList.toggle("hidden", !balance);
+  input.disabled = !balance;
+  input.required = balance;
+  $("#balance-factor-value").textContent = input.value;
 }
 
 function toggleL2mCustom() {
   $("#l2m-custom-field").classList.toggle("hidden", $("#l2m-mode").value !== "custom");
+}
+
+function closeFieldHelp(except = null) {
+  $$(".field-help.is-open").forEach((help) => {
+    if (help === except) return;
+    help.classList.remove("is-open");
+    help.querySelector(".help-button")?.setAttribute("aria-expanded", "false");
+  });
+}
+
+function toggleFieldHelp(event) {
+  event.stopPropagation();
+  const button = event.currentTarget;
+  const help = button.closest(".field-help");
+  const opening = !help.classList.contains("is-open");
+  closeFieldHelp(help);
+  help.classList.toggle("is-open", opening);
+  button.setAttribute("aria-expanded", String(opening));
 }
 
 function closeRunStreams() {
@@ -1215,7 +1682,7 @@ function renderRunDetail() {
   $("#download-log").href = `/api/v1/runs/${run.id}/attempts/${attempt.number}/logs`;
   renderRunStepper(run, attempt);
   renderRunOverview(run, attempt);
-  $("#run-yaml").textContent = run.generated_yaml || "该任务没有生成 YAML。";
+  $("#run-yaml").textContent = run.generated_yaml || "该任务没有生成 YAML";
   $("#run-request").textContent = JSON.stringify(run.request, null, 2);
   renderArtifacts(run, attempt);
 }
@@ -1289,7 +1756,7 @@ function renderRunOverview(run, attempt) {
     keyValue("HBRuntime 推理耗时", verification.hbruntime ? formatDuration(verification.hbruntime.duration_ms) : "—"),
     keyValue("警告 / 建议产物", `${summary.warning_count || 0} / ${summary.advice_artifact_count || 0}`),
   );
-  metrics.append(el("p", "cosine-note", "HBRuntime 与 hb_verifier 是真实数值冒烟和模型阶段回归验证，但仍不等同于完整业务数据集精度。"));
+  metrics.append(el("p", "cosine-note", "HBRuntime 与 hb_verifier 是真实数值冒烟和模型阶段回归验证，但仍不等同于完整业务数据集精度"));
   grid.append(execution, metrics); root.append(grid);
   if (run.kind === "MODEL_INSPECTION" && attempt.result?.metrics?.inspect) {
     const inspection = attempt.result.metrics.inspect;
@@ -1298,7 +1765,7 @@ function renderRunOverview(run, attempt) {
     root.append(card);
   }
   if (run.error) {
-    const error = el("div", "error-card"); error.append(el("h3", "", "错误诊断"), el("code", "", run.error.code), el("p", "", run.error.message || "任务未完成"), el("p", "", `建议：${run.error.advice || "下载日志后检查输入与环境。"}`)); root.append(error);
+    const error = el("div", "error-card"); error.append(el("h3", "", "错误诊断"), el("code", "", run.error.code), el("p", "", run.error.message || "任务未完成"), el("p", "", `建议：${run.error.advice || "下载日志后检查输入与环境"}`)); root.append(error);
   }
 }
 
@@ -1326,7 +1793,13 @@ function openReport(url) {
 }
 
 function showRunTab(tab) {
-  $$("[data-run-tab]").forEach((button) => button.classList.toggle("active", button.dataset.runTab === tab));
+  $(".run-body").classList.toggle("fixed-pane-active", ["logs", "config"].includes(tab));
+  $$("[data-run-tab]").forEach((button) => {
+    const active = button.dataset.runTab === tab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
   $$(".run-tab").forEach((section) => section.classList.add("hidden"));
   $(`#run-${tab}-tab`).classList.remove("hidden");
 }
@@ -1405,7 +1878,7 @@ function renderDevices() {
   const root = $("#device-list");
   root.replaceChildren();
   if (!state.devices.length) {
-    root.append(el("div", "empty-state", "尚未添加开发板。凭据将保存在本机加密 Secret Store。"));
+    root.append(el("div", "empty-state", "尚未添加开发板；凭据将保存在本机加密 Secret Store"));
     return;
   }
   state.devices.forEach((device) => {
@@ -1457,7 +1930,7 @@ async function probeDevice(deviceId) {
   } catch (error) {
     if (error.code === "HOST_KEY_UNTRUSTED" && error.observed_fingerprint) {
       const accepted = window.confirm(
-        `首次连接观察到 SSH Host Key：\n\n${error.observed_fingerprint}\n\n请通过可信渠道核对。确认保存并重新探测吗？`,
+        `首次连接观察到 SSH Host Key：\n\n${error.observed_fingerprint}\n\n请通过可信渠道核对；确认保存并重新探测吗？`,
       );
       if (accepted) {
         try {
@@ -1479,7 +1952,7 @@ async function probeDevice(deviceId) {
 }
 
 async function deleteDevice(device) {
-  if (!window.confirm(`删除开发板“${device.name}”及其本机加密凭据？历史板端任务会保留。`)) return;
+  if (!window.confirm(`删除开发板“${device.name}”及其本机加密凭据？历史板端任务会保留`)) return;
   try {
     await api(`/api/v1/devices/${device.id}`, {method: "DELETE"});
     toast("设备与加密凭据已删除");
@@ -1554,7 +2027,7 @@ function renderBoardRuns() {
   const list = $("#board-run-list");
   list.replaceChildren();
   if (!state.boardRuns.length) {
-    list.append(el("div", "empty-state", "设备探测成功、且已有 HBM 后即可运行 model_info / infer / perf。"));
+    list.append(el("div", "empty-state", "设备探测成功、且已有 HBM 后即可运行 model_info / infer / perf"));
     return;
   }
   state.boardRuns.forEach((run) => {
@@ -1568,8 +2041,7 @@ function renderBoardRuns() {
     );
     row.append(
       identity,
-      statusPill(run.status),
-      el("span", "", run.phase),
+      runState(run.status, run.phase),
       el("span", "", formatDate(run.created_at)),
       el("span", "run-chevron", "›"),
     );
@@ -1618,7 +2090,7 @@ function renderBoardRunDetail(detail) {
   if (detail.mode === "model_info" && Array.isArray(metrics.models)) {
     const modelCard = el("section", "detail-card board-result-card");
     modelCard.append(el("h3", "", "HBM 模型结构"));
-    if (!metrics.models.length) modelCard.append(el("p", "empty-state", "工具未返回可解析的模型结构；请查看原始日志。"));
+    if (!metrics.models.length) modelCard.append(el("p", "empty-state", "工具未返回可解析的模型结构；请查看原始日志"));
     metrics.models.forEach((model) => {
       const item = el("div", "board-model-info");
       item.append(
@@ -1708,13 +2180,64 @@ async function periodicRefresh() {
 
 $("#toggle-create-project").addEventListener("click", showCreateProject);
 $("#welcome-create").addEventListener("click", showCreateProject);
-$("#cancel-create-project").addEventListener("click", () => $("#create-project-form").classList.add("hidden"));
+$("#edit-project").addEventListener("click", openProjectEdit);
+$("#cancel-create-project").addEventListener("click", () => {
+  clearFormError("#project-form-error");
+  $("#create-project-form").classList.add("hidden");
+});
+$("#next-action-button").addEventListener("click", () => {
+  const button = $("#next-action-button");
+  const versionId = button.dataset.versionId;
+  if (button.dataset.action === "wizard") return openWizard();
+  if (button.dataset.action === "model") return focusProjectControl("#model-file");
+  if (button.dataset.action === "calibration-create") return focusProjectControl("#calibration-name");
+  if (["calibration", "finalize-calibration"].includes(button.dataset.action) && versionId) {
+    $("#calibration-version-select").value = versionId;
+    syncCalibrationUploadMode();
+  }
+  if (button.dataset.action === "finalize-calibration") return focusProjectControl("#finalize-calibration");
+  const selected = calibrationVersion(versionId);
+  return focusProjectControl(selected?.source_type === "npy_multi" ? "#sample-archive" : "#sample-files");
+});
 $("#create-project-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  clearFormError("#project-form-error");
+  const name = $("#project-name").value.trim();
+  if (!name) return showFormError("#project-form-error", "请输入项目名称", "#project-name");
+  const button = event.submitter || event.target.querySelector('button[type="submit"]');
+  setButtonBusy(button, true, "创建中…");
   try {
-    const project = await api("/api/v1/projects", {method: "POST", body: JSON.stringify({name: $("#project-name").value, description: $("#project-description").value})});
+    const project = await api("/api/v1/projects", {method: "POST", body: JSON.stringify({name, description: $("#project-description").value})});
     event.target.reset(); event.target.classList.add("hidden"); await loadProjects(project.id); toast("项目已创建");
-  } catch (error) { toast(error.message, true); }
+  } catch (error) {
+    showFormError("#project-form-error", error.message, "#project-name");
+  } finally {
+    setButtonBusy(button, false);
+  }
+});
+
+$("#project-edit-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.currentProject) return;
+  clearFormError("#project-edit-error");
+  const name = $("#project-edit-name").value.trim();
+  if (!name) return showFormError("#project-edit-error", "请输入项目名称", "#project-edit-name");
+  const projectId = state.currentProject.id;
+  const button = event.submitter || event.target.querySelector('button[type="submit"]');
+  setButtonBusy(button, true, "保存中…");
+  try {
+    await api(`/api/v1/projects/${projectId}`, {
+      method: "PATCH",
+      body: JSON.stringify({name, description: $("#project-edit-description").value}),
+    });
+    $("#project-edit-dialog").close();
+    await loadProjects(projectId);
+    toast("项目已更新");
+  } catch (error) {
+    showFormError("#project-edit-error", error.message, "#project-edit-name");
+  } finally {
+    setButtonBusy(button, false);
+  }
 });
 
 $("#project-import").addEventListener("change", async (event) => {
@@ -1733,50 +2256,89 @@ $("#project-import").addEventListener("change", async (event) => {
   }
 });
 
-$("#model-file").addEventListener("change", (event) => { $("#model-file-label").textContent = event.target.files[0]?.name || "上传后由隔离 Runner 解析结构和兼容性"; });
+function syncModelUploadSelection(file = null) {
+  const selected = Boolean(file);
+  $("#model-file-title").textContent = selected ? file.name : "选择 ONNX 文件";
+  $("#model-file-label").textContent = selected ? formatBytes(file.size) : "未选择文件";
+  $("#model-upload-details").classList.toggle("hidden", !selected);
+  $(".model-upload-entry").classList.toggle("has-file", selected);
+  if (selected) $("#model-name").value = file.name.replace(/\.onnx$/i, "").slice(0, 200);
+  else $("#model-name").value = "";
+}
+
+$("#model-file").addEventListener("change", (event) => {
+  clearFormError("#model-upload-error");
+  syncModelUploadSelection(event.target.files[0] || null);
+});
 $("#model-upload-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const file = $("#model-file").files[0]; if (!file || !state.currentProject) return;
-  const button = event.submitter; button.disabled = true;
+  clearFormError("#model-upload-error");
+  const file = $("#model-file").files[0];
+  if (!state.currentProject) return showFormError("#model-upload-error", "请先选择项目");
+  if (!file) return showFormError("#model-upload-error", "请选择一个 ONNX 文件", "#model-file");
+  if (!file.name.toLowerCase().endsWith(".onnx")) return showFormError("#model-upload-error", "模型文件必须使用 .onnx 扩展名", "#model-file");
+  const button = event.submitter || event.target.querySelector('button[type="submit"]');
+  setButtonBusy(button, true, "上传中…");
   try {
     const modelName = $("#model-name").value;
     const path = `/api/v1/projects/${state.currentProject.id}/models${modelName ? `?model_name=${encodeURIComponent(modelName)}` : ""}`;
     const result = await uploadBinary(path, file, (ratio) => setProgress("#model-progress", ratio));
-    event.target.reset(); $("#model-file-label").textContent = "上传后由隔离 Runner 解析结构和兼容性";
+    event.target.reset();
+    syncModelUploadSelection();
     await selectProject(state.currentProject.id, false);
     toast(result.storage_reused ? "模型已登记并复用相同内容，正在启动检查" : "模型上传完成，正在启动隔离检查");
     await inspectModel(result.id);
-  } catch (error) { toast(error.message, true); } finally { button.disabled = false; }
+  } catch (error) {
+    showFormError("#model-upload-error", error.message, "#model-file");
+  } finally {
+    setButtonBusy(button, false);
+  }
 });
 
 $("#calibration-create-form").addEventListener("submit", async (event) => {
   event.preventDefault(); if (!state.currentProject) return;
+  clearFormError("#calibration-create-error");
+  const name = $("#calibration-name").value.trim();
+  if (!name) return showFormError("#calibration-create-error", "请输入校准集名称", "#calibration-name");
+  const button = event.submitter || event.target.querySelector('button[type="submit"]');
+  setButtonBusy(button, true, "创建中…");
   try {
     const created = await api(`/api/v1/projects/${state.currentProject.id}/calibration-sets`, {method: "POST", body: JSON.stringify({
-      name: $("#calibration-name").value,
+      name,
       description: "",
       source_type: $("#calibration-source-type").value,
     })});
     event.target.reset();
+    refreshCustomSelect($("#calibration-source-type"));
     await selectProject(state.currentProject.id, false);
     $("#calibration-version-select").value = created.versions[0].id;
     syncCalibrationUploadMode();
     toast(`${calibrationSourceLabel(created.versions[0].source_type)}校准集草稿已创建`);
-  } catch (error) { toast(error.message, true); }
+  } catch (error) {
+    showFormError("#calibration-create-error", error.message, "#calibration-name");
+  } finally {
+    setButtonBusy(button, false);
+  }
 });
 
-$("#calibration-version-select").addEventListener("change", syncCalibrationUploadMode);
+$("#calibration-version-select").addEventListener("change", () => {
+  clearFormError("#sample-upload-error");
+  syncCalibrationUploadMode();
+});
 $("#sample-files").addEventListener("change", (event) => {
+  clearFormError("#sample-upload-error");
   if (event.target.files.length) $("#sample-file-label").textContent = `已选择 ${event.target.files.length} 个文件`;
   else syncCalibrationUploadMode();
 });
 $("#sample-upload-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  clearFormError("#sample-upload-error");
   const versionId = $("#calibration-version-select").value; const files = [...$("#sample-files").files];
-  if (!versionId) return toast("请选择一个 DRAFT 校准版本", true);
-  if (calibrationVersion(versionId)?.source_type === "npy_multi") return toast("多输入 NPY 必须通过 ZIP 原子导入", true);
-  if (!files.length) return toast("请选择至少一份校准样本", true);
-  const button = event.submitter; button.disabled = true;
+  if (!versionId) return showFormError("#sample-upload-error", "请选择操作版本", "#calibration-version-select");
+  if (calibrationVersion(versionId)?.source_type === "npy_multi") return showFormError("#sample-upload-error", "多输入 NPY 必须通过 ZIP 原子导入", "#sample-archive");
+  if (!files.length) return showFormError("#sample-upload-error", "请选择至少一份校准样本", "#sample-files");
+  const button = event.submitter || event.target.querySelector('button[type="submit"]');
+  setButtonBusy(button, true, "上传中…");
   try {
     for (let index = 0; index < files.length; index += 1) {
       await uploadBinary(`/api/v1/calibration-versions/${versionId}/samples`, files[index], (ratio) => setProgress("#sample-progress", (index + ratio) / files.length));
@@ -1786,7 +2348,11 @@ $("#sample-upload-form").addEventListener("submit", async (event) => {
     $("#calibration-version-select").value = versionId;
     syncCalibrationUploadMode();
     toast(`${files.length} 份校准样本已登记`);
-  } catch (error) { toast(error.message, true); } finally { button.disabled = false; }
+  } catch (error) {
+    showFormError("#sample-upload-error", error.message, "#sample-files");
+  } finally {
+    setButtonBusy(button, false);
+  }
 });
 
 $("#sample-archive").addEventListener("change", async (event) => {
@@ -1795,9 +2361,13 @@ $("#sample-archive").addEventListener("change", async (event) => {
   if (!file) return;
   if (!versionId) {
     event.target.value = "";
-    return toast("请选择一个 DRAFT 校准版本", true);
+    return showFormError("#sample-upload-error", "请选择操作版本", "#calibration-version-select");
   }
+  clearFormError("#sample-upload-error");
+  const label = event.target.closest("label");
   event.target.disabled = true;
+  label.classList.add("is-loading");
+  label.setAttribute("aria-busy", "true");
   try {
     const result = await uploadBinary(`/api/v1/calibration-versions/${versionId}/archives`, file, (ratio) => setProgress("#sample-progress", ratio));
     await selectProject(state.currentProject.id, false);
@@ -1805,21 +2375,33 @@ $("#sample-archive").addEventListener("change", async (event) => {
     syncCalibrationUploadMode();
     toast(`ZIP 已原子导入 ${result.imported_count} 份校准样本`);
   } catch (error) {
-    toast(error.message, true);
+    showFormError("#sample-upload-error", error.message, "#sample-archive");
   } finally {
-    event.target.disabled = false;
+    label.classList.remove("is-loading");
+    label.removeAttribute("aria-busy");
     event.target.value = "";
+    syncCalibrationUploadMode();
   }
 });
 
 $("#finalize-calibration").addEventListener("click", async () => {
-  const versionId = $("#calibration-version-select").value; if (!versionId) return toast("请选择一个 DRAFT 校准版本", true);
+  clearFormError("#sample-upload-error");
+  const versionId = $("#calibration-version-select").value;
+  if (!versionId) return showFormError("#sample-upload-error", "请选择操作版本", "#calibration-version-select");
+  const current = projectCalibrations().find(({version}) => version.id === versionId)?.version;
+  if (!current || current.sample_count < 20) return showFormError("#sample-upload-error", `至少需要 20 份样本；当前仅有 ${current?.sample_count || 0} 份`, "#sample-files");
+  const button = $("#finalize-calibration");
   try {
-    const current = projectCalibrations().find(({version}) => version.id === versionId)?.version;
-    if (!window.confirm(`定稿后不可再添加样本。确认冻结当前 ${current?.sample_count || 0} 份样本？`)) return;
+    if (!window.confirm(`定稿后不可再添加样本；确认冻结当前 ${current?.sample_count || 0} 份样本？`)) return;
+    setButtonBusy(button, true, "冻结中…");
     const result = await api(`/api/v1/calibration-versions/${versionId}/finalize`, {method: "POST"});
     await selectProject(state.currentProject.id, false); toast(result.sample_count < 20 ? "版本已定稿，但少于 20 份，不能用于标准转换" : "校准版本已定稿，Manifest 与源文件已冻结");
-  } catch (error) { toast(error.message, true); }
+  } catch (error) {
+    showFormError("#sample-upload-error", error.message, "#finalize-calibration");
+  } finally {
+    if (button.classList.contains("is-loading")) setButtonBusy(button, false);
+    syncCalibrationUploadMode();
+  }
 });
 
 $("#delete-project").addEventListener("click", async () => {
@@ -1828,7 +2410,7 @@ $("#delete-project").addEventListener("click", async () => {
     const preview = await api(`/api/v1/projects/${state.currentProject.id}/deletion-preview`);
     if (!preview.can_delete) return toast(preview.blocked_reason, true);
     const summary = `${preview.model_count} 个模型、${preview.calibration_set_count} 个校准集、${preview.run_count} 个任务及 ${formatBytes(preview.disk_usage_bytes)} 数据`;
-    if (!window.confirm(`永久删除“${state.currentProject.name}”及其 ${summary}？此操作不可撤销。`)) return;
+    if (!window.confirm(`永久删除“${state.currentProject.name}”及其 ${summary}？此操作不可撤销`)) return;
     await api(`/api/v1/projects/${state.currentProject.id}`, {method: "DELETE", headers: {"X-Confirm-Project": state.currentProject.id}});
     state.currentProject = null; state.projectDeletionPreview = null; $("#project-workspace").classList.add("hidden"); $("#welcome").classList.remove("hidden"); await Promise.all([loadProjects(), loadRuns()]); toast("项目、任务产物及未共享资产已删除");
   } catch (error) { toast(error.message, true); }
@@ -1840,7 +2422,7 @@ $("#refresh-runs").addEventListener("click", () => loadRuns().catch((error) => t
 $("#refresh-all-runs").addEventListener("click", () => loadRuns().catch((error) => toast(error.message, true)));
 $("#run-filter").addEventListener("change", renderAllRuns);
 $("#run-search").addEventListener("input", renderAllRuns);
-$$(".topnav-item").forEach((button) => button.addEventListener("click", () => showView(button.dataset.view)));
+$$('[data-view]').forEach((button) => button.addEventListener("click", () => showView(button.dataset.view, true)));
 
 $("#refresh-maintenance").addEventListener("click", () => loadMaintenance().catch((error) => toast(error.message, true)));
 $$('input[name="cleanup-category"]').forEach((input) => input.addEventListener("change", () => {
@@ -2022,10 +2604,23 @@ $("#wizard-model").addEventListener("change", () => {
 $("#wizard-calibration").addEventListener("change", () => updateCalibrationSelection(true));
 $("#runner-mode").addEventListener("change", syncRunnerMode);
 $("#compile-mode").addEventListener("change", toggleCompileMode);
+$("#balance-factor").addEventListener("input", (event) => { $("#balance-factor-value").textContent = event.target.value; });
 $("#l2m-mode").addEventListener("change", toggleL2mCustom);
+$$('.help-button').forEach((button) => button.addEventListener("click", toggleFieldHelp));
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".field-help")) closeFieldHelp();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeFieldHelp();
+});
 ["target-shape", "train-layout", "train-type", "resize-short", "recipe-mean", "recipe-std"].forEach((id) => $(`#${id}`).addEventListener("change", () => renderCalibrationPreview().catch(() => {})));
-WIZARD_FIELDS.forEach((id) => $(`#${id}`).addEventListener("change", () => { state.wizardPreview = null; saveWizardDraft(); }));
+WIZARD_FIELDS.forEach((id) => $(`#${id}`).addEventListener("change", () => {
+  clearWizardError();
+  state.wizardPreview = null;
+  saveWizardDraft();
+}));
 $("#additional-input-configs").addEventListener("change", () => {
+  clearWizardError();
   state.wizardPreview = null;
   saveWizardDraft();
 });
@@ -2045,21 +2640,40 @@ $("#wizard-next").addEventListener("click", async () => {
     validateWizardStep(state.wizardStep);
     if (state.wizardStep === 5) await fetchYamlPreview();
     setWizardStep(Math.min(6, state.wizardStep + 1));
-  } catch (error) { toast(error.message, true); }
+  } catch (error) { showWizardError(error.message); }
 });
 $("#wizard-back").addEventListener("click", () => setWizardStep(Math.max(1, state.wizardStep - 1)));
-$("#refresh-yaml").addEventListener("click", () => fetchYamlPreview().catch((error) => toast(error.message, true)));
+$("#refresh-yaml").addEventListener("click", () => fetchYamlPreview().catch((error) => showWizardError(error.message, 6)));
 $("#wizard-submit").addEventListener("click", async () => {
-  const button = $("#wizard-submit"); button.disabled = true;
+  const button = $("#wizard-submit");
+  clearWizardError();
+  setButtonBusy(button, true, "提交中…");
   try {
     validateWizardStep(6); await fetchYamlPreview();
     const submission = await api("/api/v1/conversion-runs", {method: "POST", body: JSON.stringify(conversionPayload())});
     try { localStorage.removeItem(draftKey()); } catch (_error) { /* ignored */ }
     $("#wizard-dialog").close(); toast(`转换任务 ${submission.run_id.slice(0, 8)} 已进入持久队列`); await loadRuns(); await openRun(submission.run_id);
-  } catch (error) { toast(error.message, true); } finally { button.disabled = false; }
+  } catch (error) {
+    showWizardError(error.message, 6);
+  } finally {
+    setButtonBusy(button, false);
+  }
 });
 
-$$("[data-run-tab]").forEach((button) => button.addEventListener("click", () => showRunTab(button.dataset.runTab)));
+$$("[data-run-tab]").forEach((button) => {
+  button.addEventListener("click", () => showRunTab(button.dataset.runTab));
+  button.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const tabs = $$("[data-run-tab]");
+    const index = tabs.indexOf(button);
+    const nextIndex = event.key === "Home" ? 0
+      : event.key === "End" ? tabs.length - 1
+        : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    showRunTab(tabs[nextIndex].dataset.runTab);
+    tabs[nextIndex].focus();
+  });
+});
 $("#pause-logs").addEventListener("click", () => {
   state.logsPaused = !state.logsPaused;
   $("#pause-logs").textContent = state.logsPaused ? "继续" : "暂停";
@@ -2067,7 +2681,7 @@ $("#pause-logs").addEventListener("click", () => {
 });
 $("#log-search").addEventListener("input", applyLogSearch);
 $("#cancel-run").addEventListener("click", async () => {
-  if (!state.currentRun || !window.confirm("确认取消当前 Attempt？已经产生的日志和可识别产物会保留。")) return;
+  if (!state.currentRun || !window.confirm("确认取消当前 Attempt？已经产生的日志和可识别产物会保留")) return;
   try { await api(`/api/v1/runs/${state.currentRun.id}/cancel`, {method: "POST"}); toast("取消请求已发送"); await refreshRunDetail(); } catch (error) { toast(error.message, true); }
 });
 $("#retry-run").addEventListener("click", async () => {
@@ -2113,4 +2727,5 @@ async function initialize() {
   }
 }
 
+initializeCustomSelects();
 initialize();

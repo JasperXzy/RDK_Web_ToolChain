@@ -41,7 +41,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m
     ports:
-      - "127.0.0.1:${RDKWT_PORT:-8080}:8080"
+      - "${RDKWT_HOST_BIND:-127.0.0.1}:${RDKWT_PORT:-8080}:8080"
     group_add:
       - "${DOCKER_GID}"
     volumes:
@@ -53,6 +53,7 @@ services:
     environment:
       RDKWT_BIND_HOST: "0.0.0.0"
       RDKWT_PORT: "8080"
+      RDKWT_ALLOWED_HOSTS: "${RDKWT_ALLOWED_HOSTS:-127.0.0.1,localhost,[::1]}"
       RDKWT_STATE_DIR: /state
       RDKWT_ASSETS_DIR: /assets
       RDKWT_RUNS_DIR: /runs

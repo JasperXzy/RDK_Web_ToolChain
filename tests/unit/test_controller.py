@@ -146,7 +146,7 @@ def test_health_profiles_and_preflight(settings) -> None:
     index, health, profiles, preflight = asyncio.run(exercise_app())
 
     assert index.status_code == 200
-    assert "六步转换向导" in index.text
+    assert "<h2>转换向导</h2>" in index.text
     assert "直接 NPY" in index.text
     assert "导入 ZIP" in index.text
     assert "frame-ancestors 'none'" in index.headers["content-security-policy"]

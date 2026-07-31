@@ -3,19 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#07111f">
   <title>RDK WebToolChain</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
   <header class="topbar">
     <a class="brand" href="/" aria-label="RDK WebToolChain 首页">
       <span class="brand-mark" aria-hidden="true">R</span>
       <span><strong>RDK</strong><small>WebToolChain</small></span>
     </a>
     <nav class="topnav" aria-label="主导航">
-      <button class="topnav-item active" data-view="workspace" type="button">工作台</button>
+      <button class="topnav-item active" data-view="workspace" type="button" aria-current="page">工作台</button>
       <button class="topnav-item" data-view="runs" type="button">任务</button>
       <button class="topnav-item" data-view="devices" type="button">开发板</button>
       <button class="topnav-item" data-view="maintenance" type="button">维护</button>
@@ -30,34 +32,29 @@
   <div class="app-shell">
     <aside class="sidebar">
       <div class="sidebar-heading">
-        <div><span class="eyebrow">Workspace</span><h2>项目</h2></div>
+        <h2>项目</h2>
         <button id="toggle-create-project" class="icon-button" type="button" title="新建项目" aria-label="新建项目">＋</button>
       </div>
-      <form id="create-project-form" class="compact-form hidden">
-        <label>项目名称<input id="project-name" maxlength="200" required placeholder="例如：ResNet18 基线"></label>
-        <label>备注<textarea id="project-description" maxlength="4000" rows="2" placeholder="用途、数据来源或负责人"></textarea></label>
+      <form id="create-project-form" class="compact-form hidden" novalidate>
+        <label>项目名称<input id="project-name" maxlength="200" required></label>
+        <label>备注<textarea id="project-description" maxlength="4000" rows="2"></textarea></label>
         <div class="form-actions"><button class="button primary small" type="submit">创建</button><button id="cancel-create-project" class="button ghost small" type="button">取消</button></div>
+        <p id="project-form-error" class="form-error hidden" role="alert"></p>
       </form>
       <label class="button ghost small project-import-button" for="project-import">导入项目包<input id="project-import" type="file" accept=".zip"></label>
       <nav id="project-list" class="project-list" aria-label="项目列表"></nav>
-      <div id="project-empty" class="sidebar-empty">还没有项目。创建一个项目开始管理模型和校准数据。</div>
-      <div class="sidebar-foot">
-        <span>LOCAL ONLY</span>
-        <small>转换容器默认断网运行</small>
-      </div>
+      <div id="project-empty" class="sidebar-empty">创建一个项目开始管理模型和校准数据</div>
     </aside>
 
-    <main class="workspace">
+    <main id="main-content" class="workspace" tabindex="-1">
       <section id="workspace-view">
         <section id="welcome" class="welcome-panel">
           <div class="welcome-copy">
-            <span class="eyebrow accent">M5 · RELEASE &amp; MAINTENANCE</span>
-            <h1><span>模型转换，</span><span>从黑盒变成工作流。</span></h1>
-            <p>导入 ONNX，冻结校准数据和平台配置，在隔离 Runner 中完成 S100 / S600 转换，再通过固定 SSH Host Key 的受控通道完成板端验证。</p>
+            <h1><span>模型转换，</span><span>从黑盒变成工作流</span></h1>
             <div class="hero-actions"><button id="welcome-create" class="button primary" type="button">创建第一个项目</button><button id="welcome-preflight" class="button ghost" type="button">查看环境预检</button></div>
           </div>
           <div class="readiness-card">
-            <div class="readiness-head"><span class="eyebrow">Readiness</span><strong id="readiness-score">检查中</strong></div>
+            <div class="readiness-head"><span class="eyebrow">环境就绪度</span><strong id="readiness-score">检查中</strong></div>
             <div id="readiness-checks" class="readiness-checks"></div>
             <div class="readiness-foot"><span>Docker / Runner / Storage</span><small>数据不离开本机</small></div>
           </div>
@@ -65,9 +62,26 @@
 
         <section id="project-workspace" class="hidden">
           <div class="project-header">
-            <div class="project-title"><span class="eyebrow">Current project</span><h1 id="current-project-name"></h1><p id="current-project-description"></p><button id="delete-project" class="danger-link" type="button">删除项目</button></div>
-            <div class="project-actions"><a id="export-project" class="button ghost" href="#">导出项目</a><button id="refresh-project" class="button ghost" type="button">刷新</button><button id="open-wizard" class="button primary" type="button">新建转换</button></div>
+            <div class="project-title"><h1 id="current-project-name"></h1><p id="current-project-description"></p></div>
+            <div class="project-action-group">
+              <div class="project-actions">
+                <button id="edit-project" class="button ghost" type="button">编辑项目</button>
+                <a id="export-project" class="button ghost" href="#">导出项目</a>
+                <button id="refresh-project" class="button ghost" type="button">刷新</button>
+                <button id="delete-project" class="button danger" type="button">删除项目</button>
+                <span id="conversion-action" class="tooltip-anchor">
+                  <button id="open-wizard" class="button primary" type="button" aria-describedby="conversion-prereq">新建转换</button>
+                  <span id="conversion-prereq" class="button-tooltip" role="tooltip"></span>
+                </span>
+              </div>
+            </div>
           </div>
+
+          <section id="project-next-action" class="next-action" aria-labelledby="next-action-title">
+            <span class="next-action-marker" aria-hidden="true">建议操作</span>
+            <div class="next-action-copy"><strong id="next-action-title">正在分析项目状态</strong></div>
+            <button id="next-action-button" class="button secondary" type="button">查看资产</button>
+          </section>
 
           <div class="project-metrics">
             <div><span>模型版本</span><strong id="metric-models">0</strong><small id="metric-model-ready">0 可转换</small></div>
@@ -78,41 +92,71 @@
 
           <div class="section-grid">
             <section class="panel asset-panel">
-              <div class="panel-heading"><div><span class="step-label">01 · MODEL</span><h2>ONNX 模型</h2></div><span class="hint">最大 <span id="upload-limit">—</span></span></div>
-              <form id="model-upload-form" class="upload-form">
-                <label class="drop-zone" for="model-file"><span class="upload-icon">↑</span><strong>选择 ONNX 文件</strong><small id="model-file-label">上传后由隔离 Runner 解析结构和兼容性</small><input id="model-file" type="file" accept=".onnx" required></label>
-                <div class="field-row"><label>模型名称<input id="model-name" maxlength="200" placeholder="默认使用文件名"></label><button class="button secondary" type="submit">上传模型</button></div>
-                <div class="progress hidden" id="model-progress"><span></span></div>
+              <div class="panel-heading"><h2>ONNX 模型</h2><span class="hint">最大 <span id="upload-limit">—</span></span></div>
+              <form id="model-upload-form" class="upload-form model-upload-form" novalidate>
+                <div class="upload-entry model-upload-entry">
+                  <label class="upload-entry-picker" for="model-file">
+                    <span class="upload-icon" aria-hidden="true">↑</span>
+                    <span class="upload-entry-copy"><strong id="model-file-title">选择 ONNX 文件</strong><small id="model-file-label" aria-live="polite">未选择文件</small></span>
+                    <span class="button ghost small upload-entry-browse" aria-hidden="true">选择文件</span>
+                    <input id="model-file" type="file" accept=".onnx" required>
+                  </label>
+                  <div id="model-upload-details" class="upload-entry-details hidden">
+                    <label>模型名称<input id="model-name" maxlength="200" autocomplete="off"></label>
+                    <button class="button secondary" type="submit">上传并检查</button>
+                  </div>
+                  <div class="progress hidden" id="model-progress" role="progressbar" aria-label="模型上传进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
+                </div>
+                <p id="model-upload-error" class="form-error hidden" role="alert"></p>
               </form>
               <div id="model-list" class="asset-list"></div>
             </section>
 
             <section class="panel asset-panel">
-              <div class="panel-heading"><div><span class="step-label">02 · CALIBRATION</span><h2>校准数据集</h2></div><span class="hint">20–100 份</span></div>
-              <form id="calibration-create-form" class="inline-create">
-                <input id="calibration-name" maxlength="200" required placeholder="校准集名称">
-                <select id="calibration-source-type" aria-label="校准源类型"><option value="images">图片 + Recipe</option><option value="npy">直接 NPY</option><option value="npy_multi">多输入 NPY ZIP</option></select>
+              <div class="panel-heading"><h2>校准数据集</h2><span class="hint">20–100 份</span></div>
+              <form id="calibration-create-form" class="calibration-create" novalidate>
+                <label>校准集名称<input id="calibration-name" maxlength="200" required></label>
+                <div class="field-control custom-select-field">
+                  <label id="calibration-source-type-label" for="calibration-source-type-trigger">样本类型</label>
+                  <div class="custom-select" data-custom-select>
+                    <select id="calibration-source-type" class="custom-select-native" tabindex="-1" aria-hidden="true" aria-labelledby="calibration-source-type-label"><option value="images">图片 + Recipe</option><option value="npy">直接 NPY</option><option value="npy_multi">多输入 NPY ZIP</option></select>
+                    <button id="calibration-source-type-trigger" class="custom-select-trigger" type="button" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-controls="calibration-source-type-listbox" aria-labelledby="calibration-source-type-label calibration-source-type-value"><span id="calibration-source-type-value" class="custom-select-value">图片 + Recipe</span><span class="custom-select-chevron" aria-hidden="true"></span></button>
+                    <div id="calibration-source-type-listbox" class="custom-select-menu hidden" role="listbox" aria-labelledby="calibration-source-type-label"></div>
+                  </div>
+                </div>
                 <button class="button secondary" type="submit">新建草稿</button>
+                <p id="calibration-create-error" class="form-error hidden" role="alert"></p>
               </form>
-              <label>当前版本<select id="calibration-version-select"><option value="">先创建校准集</option></select></label>
-              <form id="sample-upload-form" class="upload-form compact">
-                <label class="drop-zone small" for="sample-files"><span class="upload-icon">＋</span><strong id="sample-drop-title">选择 JPEG / PNG / BMP</strong><small id="sample-file-label">可一次选择多份，按选择顺序登记</small><input id="sample-files" type="file" accept=".jpg,.jpeg,.png,.bmp" multiple required></label>
-                <div class="progress hidden" id="sample-progress"><span></span></div>
-                <div class="split-actions"><button class="button secondary" type="submit">上传样本</button><label class="button ghost file-button" for="sample-archive">导入 ZIP<input id="sample-archive" type="file" accept=".zip"></label><button id="finalize-calibration" class="button ghost" type="button">定稿并冻结</button></div>
+              <div class="calibration-version-bar">
+                <div class="field-control custom-select-field">
+                  <label id="calibration-version-select-label" for="calibration-version-select-trigger">操作版本</label>
+                  <div class="custom-select" data-custom-select>
+                    <select id="calibration-version-select" class="custom-select-native" tabindex="-1" aria-hidden="true" aria-labelledby="calibration-version-select-label"><option value="" disabled selected>暂无可编辑草稿</option></select>
+                    <button id="calibration-version-select-trigger" class="custom-select-trigger" type="button" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-controls="calibration-version-select-listbox" aria-labelledby="calibration-version-select-label calibration-version-select-value"><span id="calibration-version-select-value" class="custom-select-value">暂无可编辑草稿</span><span class="custom-select-chevron" aria-hidden="true"></span></button>
+                    <div id="calibration-version-select-listbox" class="custom-select-menu hidden" role="listbox" aria-labelledby="calibration-version-select-label"></div>
+                  </div>
+                </div>
+                <p id="calibration-action-hint" class="calibration-status hidden" role="status" aria-live="polite"></p>
+              </div>
+              <form id="sample-upload-form" class="upload-form compact" aria-describedby="calibration-action-hint" novalidate>
+                <label class="drop-zone small" for="sample-files"><span class="upload-icon">＋</span><strong id="sample-drop-title">校准样本</strong><small id="sample-file-label">JPEG / PNG / BMP / NPY / ZIP</small><input id="sample-files" type="file" accept=".jpg,.jpeg,.png,.bmp" multiple required></label>
+                <div class="progress hidden" id="sample-progress" role="progressbar" aria-label="校准样本上传进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
+                <div class="split-actions"><button class="button secondary" type="submit">上传样本</button><label class="button ghost file-button" for="sample-archive">导入 ZIP<input id="sample-archive" type="file" accept=".zip"></label><button id="finalize-calibration" class="button ghost" type="button" aria-describedby="calibration-action-hint">定稿并冻结</button></div>
+                <p id="sample-upload-error" class="form-error hidden" role="alert"></p>
               </form>
               <div id="calibration-list" class="asset-list"></div>
             </section>
           </div>
 
           <section class="panel activity-panel">
-            <div class="panel-heading"><div><span class="step-label">ACTIVITY</span><h2>项目任务</h2></div><button id="refresh-runs" class="button ghost small" type="button">刷新</button></div>
+            <div class="panel-heading"><h2>项目任务</h2><button id="refresh-runs" class="button ghost small" type="button">刷新</button></div>
             <div id="project-run-list" class="run-list"><div class="empty-state">暂无任务</div></div>
           </section>
         </section>
       </section>
 
       <section id="runs-view" class="hidden">
-        <div class="page-heading"><div><span class="eyebrow">Execution history</span><h1>任务与队列</h1><p>排队、转换、模型检查和所有历史 Attempt 都保存在本机。</p></div><button id="refresh-all-runs" class="button ghost" type="button">刷新</button></div>
+        <div class="page-heading"><h1>任务与队列</h1><button id="refresh-all-runs" class="button ghost" type="button">刷新</button></div>
         <div class="run-summary-grid">
           <div><span>排队</span><strong id="runs-queued">0</strong></div><div><span>执行中</span><strong id="runs-active">0</strong></div><div><span>成功</span><strong id="runs-succeeded">0</strong></div><div><span>需处理</span><strong id="runs-attention">0</strong></div>
         </div>
@@ -120,37 +164,37 @@
       </section>
 
       <section id="devices-view" class="hidden">
-        <div class="page-heading"><div><span class="eyebrow">Board validation</span><h1>开发板与实测</h1><p>Controller 直接通过 SSH / SFTP 连接开发板；凭据只保存在本机加密 Secret Store，转换 Runner 仍保持断网。</p></div><div class="project-actions"><button id="refresh-devices" class="button ghost" type="button">刷新</button><button id="open-device-dialog" class="button primary" type="button">添加开发板</button></div></div>
+        <div class="page-heading"><h1>开发板与实测</h1><div class="project-actions"><button id="refresh-devices" class="button ghost" type="button">刷新</button><button id="open-device-dialog" class="button primary" type="button">添加开发板</button></div></div>
         <div class="run-summary-grid board-summary-grid">
           <div><span>设备</span><strong id="devices-total">0</strong></div><div><span>可用</span><strong id="devices-ready">0</strong></div><div><span>板端运行</span><strong id="board-runs-total">0</strong></div><div><span>执行中</span><strong id="board-runs-active">0</strong></div>
         </div>
         <section class="panel">
-          <div class="panel-heading"><div><span class="step-label">DEVICES</span><h2>受信任设备</h2></div><span class="hint">首次探测必须确认 SHA256 Host Key</span></div>
+          <div class="panel-heading"><div><span class="step-label">设备</span><h2>受信任设备</h2></div><span class="hint">首次探测必须确认 SHA256 Host Key</span></div>
           <div id="device-list" class="device-grid"><div class="empty-state">尚未添加开发板</div></div>
         </section>
         <section class="panel activity-panel">
-          <div class="panel-heading"><div><span class="step-label">BOARD RUNS</span><h2>板端验证历史</h2></div><button id="open-board-run-dialog" class="button secondary" type="button">新建板端验证</button></div>
-          <div id="board-run-list" class="run-list"><div class="empty-state">设备探测成功、且已有 HBM 后即可运行 model_info / infer / perf。</div></div>
+          <div class="panel-heading"><div><span class="step-label">板端任务</span><h2>板端验证历史</h2></div><button id="open-board-run-dialog" class="button secondary" type="button">新建板端验证</button></div>
+          <div id="board-run-list" class="run-list"><div class="empty-state">设备探测成功、且已有 HBM 后即可运行 model_info / infer / perf</div></div>
         </section>
       </section>
 
       <section id="maintenance-view" class="hidden">
-        <div class="page-heading"><div><span class="eyebrow">Release &amp; maintenance</span><h1>本机维护</h1><p>查看磁盘、预览后清理可再生文件，并创建或校验包含完整性清单的本地备份。</p></div><div class="project-actions"><a class="button ghost" href="/api/v1/maintenance/diagnostics">下载诊断</a><button id="refresh-maintenance" class="button primary" type="button">刷新</button></div></div>
+        <div class="page-heading"><h1>本机维护</h1><div class="project-actions"><a class="button ghost" href="/api/v1/maintenance/diagnostics">下载诊断</a><button id="refresh-maintenance" class="button primary" type="button">刷新</button></div></div>
         <div id="storage-roots" class="maintenance-metrics"><div class="empty-state">正在读取存储信息…</div></div>
         <div class="section-grid maintenance-grid">
           <section class="panel">
-            <div class="panel-heading"><div><span class="step-label">SAFE CLEANUP</span><h2>可回收空间</h2></div><span id="cleanup-total" class="hint">尚未预览</span></div>
+            <div class="panel-heading"><div><span class="step-label">安全清理</span><h2>可回收空间</h2></div><span id="cleanup-total" class="hint">尚未预览</span></div>
             <form id="cleanup-form" class="maintenance-form">
               <label class="maintenance-check"><input type="checkbox" name="cleanup-category" value="stale_uploads"><span><strong>过期上传暂存</strong><small>仅清理超过 24 小时的未完成上传</small></span><code id="cleanable-stale_uploads">—</code></label>
               <label class="maintenance-check"><input type="checkbox" name="cleanup-category" value="generated_exports"><span><strong>生成的导出包</strong><small>任务复现包和项目导出包可按需重新生成</small></span><code id="cleanable-generated_exports">—</code></label>
               <label class="maintenance-check"><input type="checkbox" name="cleanup-category" value="orphan_run_directories"><span><strong>孤立任务目录</strong><small>仅限数据库中已不存在的 UUID 任务目录</small></span><code id="cleanable-orphan_run_directories">—</code></label>
               <label class="maintenance-check"><input type="checkbox" name="cleanup-category" value="cache"><span><strong>编译缓存</strong><small>不删除 HBM；后续转换会重新构建缓存</small></span><code id="cleanable-cache">—</code></label>
               <div class="split-actions"><button class="button ghost" type="submit">生成清理预览</button><button id="execute-cleanup" class="button danger" type="button" disabled>确认并清理</button></div>
-              <p id="cleanup-note" class="security-note">任何任务处于排队或运行状态时，清理操作都会被阻止。</p>
+              <p id="cleanup-note" class="security-note">任何任务处于排队或运行状态时，清理操作都会被阻止</p>
             </form>
           </section>
           <section class="panel">
-            <div class="panel-heading"><div><span class="step-label">BACKUP &amp; RESTORE</span><h2>本地备份</h2></div><span class="hint">缓存不进入备份</span></div>
+            <div class="panel-heading"><div><span class="step-label">备份与恢复</span><h2>本地备份</h2></div><span class="hint">缓存不进入备份</span></div>
             <form id="backup-form" class="maintenance-form">
               <label class="maintenance-check compact"><input id="backup-runs" type="checkbox" checked><span><strong>包含转换与板端任务</strong><small>保存日志、HBM 和板端产物</small></span></label>
               <label class="maintenance-check compact"><input id="backup-credentials" type="checkbox" checked><span><strong>包含加密凭据</strong><small>连同 master.key 保存；备份文件必须妥善保管</small></span></label>
@@ -158,23 +202,42 @@
             </form>
             <label class="button ghost backup-import-button" for="backup-import">上传并校验已有备份<input id="backup-import" type="file" accept=".zip"></label>
             <div id="backup-list" class="backup-list"><div class="empty-state">尚未读取备份</div></div>
-            <p class="security-note restore-note">恢复必须停服执行：先在此上传并通过校验，再运行 <code>./scripts/rdkwt.sh restore &lt;文件名&gt;</code>。命令会先创建恢复前安全备份。</p>
+            <p class="security-note restore-note">恢复必须停服执行：先在此上传并通过校验，再运行 <code>./scripts/rdkwt.sh restore &lt;文件名&gt;</code>；命令会先创建恢复前安全备份</p>
           </section>
         </div>
       </section>
     </main>
   </div>
 
+  <nav class="mobile-nav" aria-label="移动端主导航">
+    <button class="mobile-nav-item active" data-view="workspace" type="button" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg><span>工作台</span></button>
+    <button class="mobile-nav-item" data-view="runs" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg><span>任务</span></button>
+    <button class="mobile-nav-item" data-view="devices" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="12" rx="2"></rect><path d="M8 21h8M12 17v4M8 9h.01M11 9h5"></path></svg><span>开发板</span></button>
+    <button class="mobile-nav-item" data-view="maintenance" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5-5L7.3 3.7l3 3L7 10l-3-3-2.4 2.4a4 4 0 0 0 5 5l7.9 7.9a2.1 2.1 0 0 0 3-3z"></path></svg><span>维护</span></button>
+  </nav>
+
+  <dialog id="project-edit-dialog" class="modal-dialog">
+    <form id="project-edit-form" class="modal-shell" novalidate>
+      <header class="dialog-header"><div><span class="eyebrow">项目信息</span><h2>编辑项目</h2></div><button class="close-button" data-close="project-edit-dialog" type="button" aria-label="关闭">×</button></header>
+      <div class="project-form-body">
+        <label>项目名称<input id="project-edit-name" maxlength="200" required></label>
+        <label>备注<textarea id="project-edit-description" maxlength="4000" rows="5"></textarea></label>
+        <p id="project-edit-error" class="form-error hidden" role="alert"></p>
+      </div>
+      <footer class="dialog-footer"><span class="dialog-spacer"></span><button class="button ghost" data-close="project-edit-dialog" type="button">取消</button><button class="button primary" type="submit">保存修改</button></footer>
+    </form>
+  </dialog>
+
   <dialog id="device-dialog" class="modal-dialog">
     <form id="device-form" class="modal-shell">
-      <header class="dialog-header"><div><span class="eyebrow">New device</span><h2>添加开发板</h2><p>Host Key 可先留空；首次探测只显示指纹，确认后才会建立信任。</p></div><button class="close-button" data-close="device-dialog" type="button" aria-label="关闭">×</button></header>
+      <header class="dialog-header"><div><span class="eyebrow">设备管理</span><h2>添加开发板</h2><p>Host Key 可先留空；首次探测只显示指纹，确认后才会建立信任</p></div><button class="close-button" data-close="device-dialog" type="button" aria-label="关闭">×</button></header>
       <div class="device-form-body">
         <div class="form-grid two"><label>设备名称<input id="device-name" maxlength="200" required placeholder="例如：实验室 S100"></label><label>平台<select id="device-platform"><option value="s100">RDK S100</option><option value="s600">RDK S600</option></select></label><label>主机 / IP<input id="device-host" maxlength="255" required placeholder="192.168.1.10"></label><label>SSH 端口<input id="device-port" type="number" min="1" max="65535" value="22" required></label><label>用户名<input id="device-user" maxlength="128" value="root" required></label><label>认证方式<select id="device-auth-type"><option value="password">密码</option><option value="private_key">私钥</option></select></label></div>
         <label id="device-password-field">密码<input id="device-password" type="password" autocomplete="new-password"></label>
         <label id="device-private-key-field" class="hidden">OpenSSH / PEM 私钥<textarea id="device-private-key" rows="6" autocomplete="off" spellcheck="false"></textarea></label>
         <label id="device-passphrase-field" class="hidden">私钥口令（可选）<input id="device-passphrase" type="password" autocomplete="new-password"></label>
         <label>SSH Host Key 指纹（可选）<input id="device-fingerprint" maxlength="96" placeholder="SHA256:…"></label>
-        <p class="security-note">密码或私钥不会进入 SQLite、日志、任务快照或导出包。保存后表单会立即清空。</p>
+        <p class="security-note">密码或私钥不会进入 SQLite、日志、任务快照或导出包；保存后表单会立即清空</p>
       </div>
       <footer class="dialog-footer"><span class="dialog-spacer"></span><button class="button ghost" data-close="device-dialog" type="button">取消</button><button class="button primary" type="submit">保存设备</button></footer>
     </form>
@@ -182,61 +245,65 @@
 
   <dialog id="board-run-create-dialog" class="modal-dialog">
     <form id="board-run-form" class="modal-shell">
-      <header class="dialog-header"><div><span class="eyebrow">New board run</span><h2>新建板端验证</h2><p>只允许上传已完成转换的 HBM，并调用白名单内的 hrt_model_exec 模式。</p></div><button class="close-button" data-close="board-run-create-dialog" type="button" aria-label="关闭">×</button></header>
+      <header class="dialog-header"><div><span class="eyebrow">板端任务</span><h2>新建板端验证</h2><p>只允许上传已完成转换的 HBM，并调用白名单内的 hrt_model_exec 模式</p></div><button class="close-button" data-close="board-run-create-dialog" type="button" aria-label="关闭">×</button></header>
       <div class="device-form-body">
         <div class="form-grid two"><label>开发板<select id="board-device" required></select></label><label>成功转换 / HBM<select id="board-conversion" required></select></label><label>运行模式<select id="board-mode"><option value="model_info">model_info</option><option value="infer">infer</option><option value="perf">perf</option></select></label><label id="board-core-field" class="hidden">BPU Core<select id="board-core"><option value="0">自动调度</option><option value="1">Core 0</option><option value="2">Core 1</option></select></label></div>
         <label id="board-input-field" class="hidden">推理输入<input id="board-input" type="file"></label>
         <div id="board-perf-fields" class="form-grid two hidden"><label>线程数<input id="board-threads" type="number" min="1" max="32" value="1"></label><label>停止条件<select id="board-duration-mode"><option value="frames">帧数</option><option value="time">时间（分钟）</option></select></label><label id="board-frame-field">帧数<input id="board-frame-count" type="number" min="1" max="1000000" value="200"></label><label id="board-time-field" class="hidden">运行分钟数<input id="board-perf-time" type="number" min="1" max="1440" value="1"></label></div>
-        <p class="security-note">远端临时目录固定为 /tmp/rdkwt/&lt;run-id&gt;，完成或失败后自动清理。开发机 GPU 不参与此步骤。</p>
-        <div id="board-upload-progress" class="progress hidden"><span></span></div>
+        <p class="security-note">远端临时目录固定为 /tmp/rdkwt/&lt;run-id&gt;，完成或失败后自动清理；开发机 GPU 不参与此步骤</p>
+        <div id="board-upload-progress" class="progress hidden" role="progressbar" aria-label="板端输入上传进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
       </div>
       <footer class="dialog-footer"><span class="dialog-spacer"></span><button class="button ghost" data-close="board-run-create-dialog" type="button">取消</button><button class="button primary" type="submit">提交验证</button></footer>
     </form>
   </dialog>
 
   <dialog id="board-run-dialog" class="modal-dialog board-run-dialog">
-    <div class="modal-shell"><header class="dialog-header"><div><span class="eyebrow">Board run</span><h2 id="board-run-title">板端验证详情</h2><p id="board-run-subtitle"></p></div><button class="close-button" data-close="board-run-dialog" type="button" aria-label="关闭">×</button></header><div id="board-run-detail" class="board-run-detail"></div><footer class="dialog-footer"><button id="cancel-board-run" class="button danger hidden" type="button">取消任务</button><span class="dialog-spacer"></span><button class="button ghost" data-close="board-run-dialog" type="button">完成</button></footer></div>
+    <div class="modal-shell"><header class="dialog-header"><div><span class="eyebrow">板端任务</span><h2 id="board-run-title">板端验证详情</h2><p id="board-run-subtitle"></p></div><button class="close-button" data-close="board-run-dialog" type="button" aria-label="关闭">×</button></header><div id="board-run-detail" class="board-run-detail"></div><footer class="dialog-footer"><button id="cancel-board-run" class="button danger hidden" type="button">取消任务</button><span class="dialog-spacer"></span><button class="button ghost" data-close="board-run-dialog" type="button">完成</button></footer></div>
   </dialog>
 
   <dialog id="wizard-dialog" class="sheet-dialog wizard-dialog">
     <div class="dialog-shell">
-      <header class="dialog-header"><div><span class="eyebrow">New conversion</span><h2>六步转换向导</h2><p id="wizard-draft-status">草稿自动保存在当前浏览器</p></div><button class="close-button" data-close="wizard-dialog" type="button" aria-label="关闭">×</button></header>
+      <header class="dialog-header"><div><h2>转换向导</h2><p id="wizard-draft-status">草稿自动保存在当前浏览器</p></div><button class="close-button" data-close="wizard-dialog" type="button" aria-label="关闭">×</button></header>
       <ol id="wizard-steps" class="wizard-steps">
         <li class="active" data-step="1"><b>1</b><span>模型</span></li><li data-step="2"><b>2</b><span>目标平台</span></li><li data-step="3"><b>3</b><span>输入配置</span></li><li data-step="4"><b>4</b><span>校准与预处理</span></li><li data-step="5"><b>5</b><span>编译</span></li><li data-step="6"><b>6</b><span>预览提交</span></li>
       </ol>
-      <form id="wizard-form" class="wizard-body">
+      <form id="wizard-form" class="wizard-body" novalidate>
+        <div id="wizard-error-summary" class="form-error wizard-error hidden" role="alert" tabindex="-1"></div>
         <section class="wizard-page" data-page="1">
-          <div class="wizard-copy"><span class="step-label">STEP 01</span><h3>选择已检查的模型</h3><p>ONNX 必须先通过隔离解析；IR、opset、输入输出和 external data 都会被冻结到模型版本。</p></div>
-          <label>模型版本<select id="wizard-model" required><option value="">选择模型</option></select></label>
+          <div class="wizard-copy"><h3>选择已检查的模型</h3></div>
+          <div class="field-control">
+            <div class="field-label-row"><label for="wizard-model">模型版本</label><span class="field-help"><button class="help-button" type="button" aria-label="模型版本说明" aria-describedby="help-model-version" aria-expanded="false">?</button><span id="help-model-version" class="field-tooltip" role="tooltip">仅显示已通过隔离检查的模型；IR、opset、输入输出和 external data 状态会随模型版本冻结</span></span></div>
+            <select id="wizard-model" required><option value="">选择模型</option></select>
+          </div>
           <div id="wizard-model-info" class="inspection-card empty-state">请选择模型</div>
         </section>
         <section class="wizard-page hidden" data-page="2">
-          <div class="wizard-copy"><span class="step-label">STEP 02</span><h3>目标平台</h3><p>平台 Profile 是不可绕过的能力边界；切换平台会重置不合法的 Core 与 L2M。</p></div>
+          <div class="wizard-copy"><div class="wizard-heading-row"><h3>目标平台</h3><span class="field-help"><button class="help-button" type="button" aria-label="目标平台说明" aria-describedby="help-target-platform" aria-expanded="false">?</button><span id="help-target-platform" class="field-tooltip" role="tooltip">目标平台决定 march、Core、L2M 和可用编译参数；切换平台会重置不兼容值</span></span></div></div>
           <div id="profile-cards" class="profile-cards"></div>
           <input id="wizard-profile" type="hidden" required>
           <div id="profile-locks" class="lock-grid"></div>
-          <div class="form-grid three"><label>Runner<select id="runner-mode"><option value="cpu">CPU（本机可用）</option><option value="gpu">GPU（可选）</option></select></label><div id="runner-mode-note" class="inline-note">GPU 不可用时不会阻断 CPU 转换。</div></div>
+          <div class="form-grid runner-fields"><label>Runner<select id="runner-mode"><option value="cpu">CPU（本机可用）</option><option value="gpu">GPU（可选）</option></select></label></div>
         </section>
         <section class="wizard-page hidden" data-page="3">
-          <div class="wizard-copy"><span class="step-label">STEP 03</span><h3>输入配置</h3><p>字段由 ONNX 结构生成。NV12 要求宽高为偶数，归一化参数数量必须与通道一致。</p></div>
-          <div id="input-config-list"><div class="input-config-card"><h4>Input 1</h4><div class="form-grid three"><label>输入节点<input id="input-name" readonly></label><label>目标 Shape<input id="target-shape" required placeholder="1,3,224,224"></label><label>训练布局<select id="train-layout"><option>NCHW</option><option>NHWC</option></select></label><label>训练输入<select id="train-type"><option value="rgb">RGB</option><option value="bgr">BGR</option><option value="gray">Gray</option><option value="yuv444">YUV444</option><option value="featuremap">Featuremap</option></select></label><label>Runtime 输入<select id="runtime-type"><option value="nv12">NV12</option><option value="rgb">RGB</option><option value="bgr">BGR</option><option value="yuv444">YUV444</option><option value="gray">Gray</option><option value="featuremap">Featuremap</option></select></label><label>Mean<input id="input-mean" placeholder="123.675,116.28,103.53"></label><label>Scale<input id="input-scale" placeholder="0.0171,0.0175,0.0174"></label><label>Std（可选）<input id="input-std" placeholder="留空"></label></div></div><div id="additional-input-configs"></div></div>
+          <div class="wizard-copy"><h3>输入配置</h3></div>
+          <div id="input-config-list"><div class="input-config-card"><h4>输入 1</h4><div class="form-grid three"><label>输入节点<input id="input-name" readonly></label><div class="field-control"><div class="field-label-row"><label for="target-shape">目标 Shape</label><span class="field-help"><button class="help-button" type="button" aria-label="目标 Shape 说明" aria-describedby="help-target-shape" aria-expanded="false">?</button><span id="help-target-shape" class="field-tooltip" role="tooltip">动态维度必须填写具体正整数，维度数量需与模型输入一致</span></span></div><input id="target-shape" required placeholder="1,3,224,224"></div><label>训练布局<select id="train-layout"><option>NCHW</option><option>NHWC</option></select></label><label>训练输入<select id="train-type"><option value="rgb">RGB</option><option value="bgr">BGR</option><option value="gray">Gray</option><option value="yuv444">YUV444</option><option value="featuremap">Featuremap</option></select></label><div class="field-control"><div class="field-label-row"><label for="runtime-type">Runtime 输入</label><span class="field-help"><button class="help-button" type="button" aria-label="Runtime 输入说明" aria-describedby="help-runtime-input" aria-expanded="false">?</button><span id="help-runtime-input" class="field-tooltip" role="tooltip">部署时送入模型的数据格式；NV12 要求图像宽高为偶数</span></span></div><select id="runtime-type"><option value="nv12">NV12</option><option value="rgb">RGB</option><option value="bgr">BGR</option><option value="yuv444">YUV444</option><option value="gray">Gray</option><option value="featuremap">Featuremap</option></select></div><div class="field-control"><div class="field-label-row"><label for="input-mean">Mean</label><span class="field-help help-right"><button class="help-button" type="button" aria-label="归一化参数说明" aria-describedby="help-normalization" aria-expanded="false">?</button><span id="help-normalization" class="field-tooltip" role="tooltip">Mean、Scale、Std 的数量需与通道数一致；留空表示不应用该项</span></span></div><input id="input-mean" placeholder="123.675,116.28,103.53"></div><label>Scale<input id="input-scale" placeholder="0.0171,0.0175,0.0174"></label><label>Std（可选）<input id="input-std" placeholder="留空"></label></div></div><div id="additional-input-configs"></div></div>
         </section>
         <section class="wizard-page hidden" data-page="4">
-          <div class="wizard-copy"><span class="step-label">STEP 04</span><h3>校准数据与预处理</h3><p id="calibration-step-copy">选择冻结的校准版本，并检查第一份样本的中心裁剪结果和归一化统计。</p></div>
-          <div class="form-grid three"><label>校准版本<select id="wizard-calibration" required><option value="">选择已定稿版本</option></select></label><label>使用样本数<input id="sample-limit" type="number" min="20" max="100" value="20"></label><label>校准算法<select id="calibration-algorithm"><option value="default">default</option><option value="mix">mix</option><option value="kl">kl</option><option value="max">max</option></select></label></div>
-          <div id="image-recipe-fields" class="form-grid three"><label>Recipe<select id="recipe-id"><option value="image-center-crop">Center crop</option><option value="imagenet-resnet18">ImageNet ResNet18</option></select></label><label>短边 Resize<input id="resize-short" type="number" min="1" max="16384" value="256"></label><label>Recipe Mean<input id="recipe-mean" value="0.485,0.456,0.406"></label><label>Recipe Std<input id="recipe-std" value="0.229,0.224,0.225"></label></div>
+          <div class="wizard-copy"><h3>校准数据与预处理</h3></div>
+          <div class="form-grid calibration-core-fields"><label>校准版本<select id="wizard-calibration" required><option value="">选择已定稿版本</option></select></label><label>使用样本数<input id="sample-limit" type="number" min="20" max="100" value="20"></label><div class="field-control"><div class="field-label-row"><label for="calibration-algorithm">校准算法</label><span class="field-help help-right"><button class="help-button" type="button" aria-label="校准算法说明" aria-describedby="help-calibration-algorithm" aria-expanded="false">?</button><span id="help-calibration-algorithm" class="field-tooltip" role="tooltip">default 使用工具链默认策略；mix、kl、max 对应不同校准算法</span></span></div><select id="calibration-algorithm"><option value="default">default</option><option value="mix">mix</option><option value="kl">kl</option><option value="max">max</option></select></div></div>
+          <div id="image-recipe-fields" class="form-grid recipe-fields"><div class="field-control"><div class="field-label-row"><label for="recipe-id">Recipe</label><span class="field-help"><button class="help-button" type="button" aria-label="Recipe 说明" aria-describedby="help-recipe" aria-expanded="false">?</button><span id="help-recipe" class="field-tooltip" role="tooltip">仅用于图片校准，决定 Resize、中心裁剪和归一化方式</span></span></div><select id="recipe-id"><option value="image-center-crop">Center crop</option><option value="imagenet-resnet18">ImageNet ResNet18</option></select></div><label>短边 Resize<input id="resize-short" type="number" min="1" max="16384" value="256"></label><label>Recipe Mean<input id="recipe-mean" value="0.485,0.456,0.406"></label><label>Recipe Std<input id="recipe-std" value="0.229,0.224,0.225"></label></div>
           <div id="calibration-preview" class="preview-grid"><div class="preview-frame"><span>原图</span><img id="preview-original" alt="第一份校准原图"></div><div class="preview-frame"><span>处理后</span><canvas id="preview-processed" width="224" height="224"></canvas></div><div id="preview-stats" class="preview-stats"><span>选择校准版本后生成预览</span></div></div>
         </section>
         <section class="wizard-page hidden" data-page="5">
-          <div class="wizard-copy"><span class="step-label">STEP 05</span><h3>编译参数</h3><p>S100 固定单核与 L2M=0；S600 可使用双核和自动 L2M。高级项只开放白名单字段。</p></div>
-          <div class="form-grid three"><label>输出前缀<input id="output-prefix" value="resnet18_224x224_nv12" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" required></label><label>编译模式<select id="compile-mode"><option value="latency">latency</option><option value="bandwidth">bandwidth</option><option value="balance">balance</option></select></label><label>Balance factor<input id="balance-factor" type="number" min="0" max="100" disabled></label><label>Core 数<select id="core-num"><option value="1">1</option><option value="2">2</option></select></label><label>L2M<select id="l2m-mode"><option value="0">关闭（0）</option><option value="auto">自动</option><option value="custom">自定义</option></select></label><label id="l2m-custom-field" class="hidden">L2M bytes<input id="l2m-custom" type="number" min="0" max="25165824" value="0"></label><label>优化级别<select id="optimize-level"><option value="O2">O2</option><option value="O1">O1</option><option value="O0">O0（调试）</option></select></label><label>Jobs<input id="jobs" type="number" min="1" max="128" value="8"></label><label>编译缓存<select id="cache-mode"><option value="enable">启用复用</option><option value="disable">关闭</option><option value="force_overwrite">强制重建</option></select></label><label>结果验证<select id="verification-mode"><option value="basic">HBRuntime + hb_verifier</option><option value="disabled">关闭</option></select></label><label>比较小数位<input id="compare-digits" type="number" min="1" max="12" value="5"></label></div>
+          <div class="wizard-copy"><h3>编译参数</h3></div>
+          <div class="form-grid three"><label>输出前缀<input id="output-prefix" value="resnet18_224x224_nv12" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]*" required></label><div class="field-control"><div class="field-label-row"><label for="compile-mode">编译模式</label><span class="field-help"><button class="help-button" type="button" aria-label="编译模式说明" aria-describedby="help-compile-mode" aria-expanded="false">?</button><span id="help-compile-mode" class="field-tooltip" role="tooltip">低延迟优先推理时延；低带宽优先外存带宽；自定义平衡可调节两者权重</span></span></div><select id="compile-mode"><option value="latency">低延迟</option><option value="bandwidth">低带宽</option><option value="balance">自定义平衡</option></select></div><div id="balance-factor-field" class="field-control balance-factor-field hidden"><div class="field-label-row"><label for="balance-factor">平衡因子</label><span class="field-help help-right"><button class="help-button" type="button" aria-label="平衡因子说明" aria-describedby="help-balance-factor" aria-expanded="false">?</button><span id="help-balance-factor" class="field-tooltip" role="tooltip">0 偏带宽，100 偏延迟；仅在自定义平衡模式下生效</span></span><output id="balance-factor-value" for="balance-factor">50</output></div><input id="balance-factor" class="balance-factor-input" type="range" min="0" max="100" step="1" value="50" disabled><div class="range-labels"><span>带宽 0</span><span>延迟 100</span></div></div><label>Core 数<select id="core-num"><option value="1">1</option><option value="2">2</option></select></label><div class="field-control"><div class="field-label-row"><label for="l2m-mode">L2M</label><span class="field-help"><button class="help-button" type="button" aria-label="L2M 说明" aria-describedby="help-l2m" aria-expanded="false">?</button><span id="help-l2m" class="field-tooltip" role="tooltip">控制编译优化可使用的 L2M 空间；可选值由目标平台 Profile 限制</span></span></div><select id="l2m-mode"><option value="0">关闭（0）</option><option value="auto">自动</option><option value="custom">自定义</option></select></div><label id="l2m-custom-field" class="hidden">L2M bytes<input id="l2m-custom" type="number" min="0" max="25165824" value="0"></label><label>优化级别<select id="optimize-level"><option value="O2">O2</option><option value="O1">O1</option><option value="O0">O0（调试）</option></select></label><label>Jobs<input id="jobs" type="number" min="1" max="128" value="8"></label><label>编译缓存<select id="cache-mode"><option value="enable">启用复用</option><option value="disable">关闭</option><option value="force_overwrite">强制重建</option></select></label><label>结果验证<select id="verification-mode"><option value="basic">HBRuntime + hb_verifier</option><option value="disabled">关闭</option></select></label><label>比较小数位<input id="compare-digits" type="number" min="1" max="12" value="5"></label></div>
         </section>
         <section class="wizard-page hidden" data-page="6">
-          <div class="wizard-copy"><span class="step-label">STEP 06</span><h3>YAML 预览与提交</h3><p>系统会再次校验资产哈希、Profile 约束和交叉字段，然后冻结请求、镜像 ID 与 YAML。</p></div>
+          <div class="wizard-copy"><h3>YAML 预览与提交</h3></div>
           <div id="preview-warnings" class="warning-list"></div>
           <div class="yaml-toolbar"><span><i class="source-dot system"></i>系统路径 <i class="source-dot profile"></i>Profile 锁定 <i class="source-dot user"></i>用户配置</span><button id="refresh-yaml" class="button ghost small" type="button">重新校验</button></div>
           <pre id="yaml-preview" class="code-block">进入本步骤后生成 YAML…</pre>
-          <label class="confirm-row"><input id="confirm-snapshot" type="checkbox" required><span>我已确认模型输入、预处理和目标平台；提交后该 Run 配置不可修改。</span></label>
+          <label class="confirm-row"><input id="confirm-snapshot" type="checkbox" required><span>我已确认模型输入、预处理和目标平台；提交后该 Run 配置不可修改</span></label>
         </section>
       </form>
       <footer class="dialog-footer"><button id="wizard-back" class="button ghost hidden" type="button">上一步</button><span class="dialog-spacer"></span><button id="wizard-next" class="button primary" type="button">下一步</button><button id="wizard-submit" class="button primary hidden" type="button">提交转换</button></footer>
@@ -244,25 +311,25 @@
   </dialog>
 
   <dialog id="comparison-dialog" class="modal-dialog comparison-dialog">
-    <div class="modal-shell"><header class="dialog-header"><div><span class="eyebrow">Run comparison</span><h2>任务对比</h2><p id="comparison-subtitle">同一模型的结构化指标</p></div><button class="close-button" data-close="comparison-dialog" type="button" aria-label="关闭">×</button></header><div id="comparison-result" class="comparison-result"></div><footer class="dialog-footer"><span class="dialog-spacer"></span><button class="button ghost" data-close="comparison-dialog" type="button">完成</button></footer></div>
+    <div class="modal-shell"><header class="dialog-header"><div><span class="eyebrow">指标对比</span><h2>任务对比</h2><p id="comparison-subtitle">同一模型的结构化指标</p></div><button class="close-button" data-close="comparison-dialog" type="button" aria-label="关闭">×</button></header><div id="comparison-result" class="comparison-result"></div><footer class="dialog-footer"><span class="dialog-spacer"></span><button class="button ghost" data-close="comparison-dialog" type="button">完成</button></footer></div>
   </dialog>
 
   <dialog id="run-dialog" class="sheet-dialog run-dialog">
     <div class="dialog-shell">
-      <header class="dialog-header run-header"><div><span id="run-kind" class="eyebrow">Conversion</span><h2 id="run-title">任务详情</h2><p id="run-subtitle"></p></div><div class="run-actions"><span id="run-status" class="status-pill neutral">—</span><button id="cancel-run" class="button danger hidden" type="button">取消</button><button id="retry-run" class="button secondary hidden" type="button">按快照重试</button><a id="export-run" class="button primary hidden" href="#">导出完整包</a><button class="close-button" data-close="run-dialog" type="button" aria-label="关闭">×</button></div></header>
+      <header class="dialog-header run-header"><div><span id="run-kind" class="eyebrow">模型转换</span><h2 id="run-title">任务详情</h2><p id="run-subtitle"></p></div><div class="run-actions"><span id="run-status" class="status-pill neutral" aria-live="polite">—</span><button id="cancel-run" class="button danger hidden" type="button">取消</button><button id="retry-run" class="button secondary hidden" type="button">按快照重试</button><a id="export-run" class="button primary hidden" href="#">导出完整包</a><button class="close-button" data-close="run-dialog" type="button" aria-label="关闭">×</button></div></header>
       <div id="run-stepper" class="run-stepper"></div>
-      <nav class="tabbar" aria-label="任务详情标签"><button class="active" data-run-tab="overview" type="button">概览</button><button data-run-tab="logs" type="button">实时日志</button><button data-run-tab="config" type="button">配置快照</button><button data-run-tab="artifacts" type="button">产物</button></nav>
+      <nav class="tabbar" aria-label="任务详情标签" role="tablist"><button id="run-overview-trigger" class="active" data-run-tab="overview" type="button" role="tab" aria-controls="run-overview-tab" aria-selected="true">概览</button><button id="run-logs-trigger" data-run-tab="logs" type="button" role="tab" aria-controls="run-logs-tab" aria-selected="false" tabindex="-1">实时日志</button><button id="run-config-trigger" data-run-tab="config" type="button" role="tab" aria-controls="run-config-tab" aria-selected="false" tabindex="-1">配置快照</button><button id="run-artifacts-trigger" data-run-tab="artifacts" type="button" role="tab" aria-controls="run-artifacts-tab" aria-selected="false" tabindex="-1">产物</button></nav>
       <div class="run-body">
-        <section id="run-overview-tab" class="run-tab"></section>
-        <section id="run-logs-tab" class="run-tab hidden"><div class="log-toolbar"><button id="pause-logs" class="button ghost small" type="button">暂停</button><label class="checkbox-label"><input id="auto-scroll" type="checkbox" checked> 自动滚动</label><label class="log-search">搜索<input id="log-search" type="search" placeholder="错误码或关键字"></label><a id="download-log" class="button ghost small" href="#">下载原始日志</a></div><div id="log-viewer" class="log-viewer" aria-live="polite"></div></section>
-        <section id="run-config-tab" class="run-tab hidden"><div class="snapshot-grid"><div><h3>生成 YAML</h3><pre id="run-yaml" class="code-block"></pre></div><div><h3>规范化请求</h3><pre id="run-request" class="code-block"></pre></div></div></section>
-        <section id="run-artifacts-tab" class="run-tab hidden"><div id="artifact-list" class="artifact-list"></div><div id="report-preview" class="report-preview hidden"><div class="report-head"><strong>受限报告预览</strong><button id="close-report" class="button ghost small" type="button">关闭</button></div><iframe id="report-frame" title="OpenExplorer 报告" sandbox></iframe></div></section>
+        <section id="run-overview-tab" class="run-tab" role="tabpanel" aria-labelledby="run-overview-trigger" tabindex="0"></section>
+        <section id="run-logs-tab" class="run-tab hidden" role="tabpanel" aria-labelledby="run-logs-trigger" tabindex="0"><div class="log-toolbar"><button id="pause-logs" class="button ghost small" type="button">暂停</button><label class="checkbox-label"><input id="auto-scroll" type="checkbox" checked> 自动滚动</label><label class="log-search" for="log-search"><span>搜索</span><input id="log-search" type="search" placeholder="错误码或关键字"></label><a id="download-log" class="button ghost small" href="#">下载原始日志</a></div><div id="log-viewer" class="log-viewer" aria-live="polite"></div></section>
+        <section id="run-config-tab" class="run-tab hidden" role="tabpanel" aria-labelledby="run-config-trigger" tabindex="0"><div class="snapshot-grid"><div><h3>生成 YAML</h3><pre id="run-yaml" class="code-block"></pre></div><div><h3>规范化请求</h3><pre id="run-request" class="code-block"></pre></div></div></section>
+        <section id="run-artifacts-tab" class="run-tab hidden" role="tabpanel" aria-labelledby="run-artifacts-trigger" tabindex="0"><div id="artifact-list" class="artifact-list"></div><div id="report-preview" class="report-preview hidden"><div class="report-head"><strong>受限报告预览</strong><button id="close-report" class="button ghost small" type="button">关闭</button></div><iframe id="report-frame" title="OpenExplorer 报告" sandbox></iframe></div></section>
       </div>
     </div>
   </dialog>
 
   <dialog id="preflight-dialog" class="modal-dialog">
-    <div class="modal-shell"><header class="dialog-header"><div><span class="eyebrow">System preflight</span><h2>本地环境预检</h2><p>不会静默拉取镜像，也不会向外部发送模型数据。</p></div><button class="close-button" data-close="preflight-dialog" type="button" aria-label="关闭">×</button></header><div id="preflight-details" class="preflight-details"></div><footer class="dialog-footer"><button id="rerun-smoke" class="button secondary" type="button">运行 Runner Smoke Test</button><span class="dialog-spacer"></span><button class="button ghost" data-close="preflight-dialog" type="button">完成</button></footer></div>
+    <div class="modal-shell"><header class="dialog-header"><div><span class="eyebrow">系统检查</span><h2>本地环境预检</h2><p>不会静默拉取镜像，也不会向外部发送模型数据</p></div><button class="close-button" data-close="preflight-dialog" type="button" aria-label="关闭">×</button></header><div id="preflight-details" class="preflight-details"></div><footer class="dialog-footer"><button id="rerun-smoke" class="button secondary" type="button">运行 Runner Smoke Test</button><span class="dialog-spacer"></span><button class="button ghost" data-close="preflight-dialog" type="button">完成</button></footer></div>
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
