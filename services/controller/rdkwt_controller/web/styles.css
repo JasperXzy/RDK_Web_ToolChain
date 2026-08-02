@@ -394,7 +394,6 @@ dialog::backdrop { background: rgba(18,29,25,.48); backdrop-filter: blur(5px); }
 .device-error { margin: 11px 0 0; padding: 9px 10px; border-radius: 8px; color: var(--red); background: var(--red-soft); font-size: 9px; line-height: 1.55; }
 .project-form-body, .device-form-body, .board-run-detail { max-height: 66vh; overflow: auto; padding: 20px 24px; }
 .project-form-body, .device-form-body { display: grid; gap: 13px; }
-.security-note { margin: 0; padding: 10px 12px; border-left: 3px solid var(--green); border-radius: 7px; color: var(--muted); background: var(--green-soft); font-size: 9px; line-height: 1.6; }
 .board-run-dialog { width: min(820px, calc(100vw - 34px)); }
 .board-run-detail { display: grid; gap: 13px; }
 .board-result-card { margin-top: 0; }
@@ -902,7 +901,6 @@ dialog::backdrop { background: rgba(2, 8, 18, .72); backdrop-filter: blur(7px); 
 .device-facts span { font-size: 9px; }
 .device-facts code { color: var(--ink); font-size: 10px; }
 .device-error { color: #fecdd6; background: var(--red-soft); font-size: 10px; }
-.security-note { border-color: var(--accent); color: var(--muted); background: rgba(34, 211, 238, .07); font-size: 10px; }
 
 .toast {
   border: 1px solid var(--line-dark);

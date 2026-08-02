@@ -250,7 +250,6 @@
         <label id="device-private-key-field" class="hidden">OpenSSH / PEM 私钥<textarea id="device-private-key" rows="6" autocomplete="off" spellcheck="false"></textarea></label>
         <label id="device-passphrase-field" class="hidden">私钥口令（可选）<input id="device-passphrase" type="password" autocomplete="new-password"></label>
         <label>SSH Host Key 指纹（可选）<input id="device-fingerprint" maxlength="96" placeholder="SHA256:…"></label>
-        <p class="security-note">密码或私钥不会进入 SQLite、日志、任务快照或导出包；保存后表单会立即清空</p>
       </div>
       <footer class="dialog-footer"><span class="dialog-spacer"></span><button class="button ghost" data-close="device-dialog" type="button">取消</button><button class="button primary" type="submit">保存设备</button></footer>
     </form>
@@ -263,7 +262,6 @@
         <div class="form-grid two"><label>开发板<select id="board-device" required></select></label><label>成功转换 / HBM<select id="board-conversion" required></select></label><label>运行模式<select id="board-mode"><option value="model_info">model_info</option><option value="infer">infer</option><option value="perf">perf</option></select></label><label id="board-core-field" class="hidden">BPU Core<select id="board-core"><option value="0">自动调度</option><option value="1">Core 0</option><option value="2">Core 1</option></select></label></div>
         <label id="board-input-field" class="hidden">推理输入<input id="board-input" type="file"></label>
         <div id="board-perf-fields" class="form-grid two hidden"><label>线程数<input id="board-threads" type="number" min="1" max="32" value="1"></label><label>停止条件<select id="board-duration-mode"><option value="frames">帧数</option><option value="time">时间（分钟）</option></select></label><label id="board-frame-field">帧数<input id="board-frame-count" type="number" min="1" max="1000000" value="200"></label><label id="board-time-field" class="hidden">运行分钟数<input id="board-perf-time" type="number" min="1" max="1440" value="1"></label></div>
-        <p class="security-note">远端临时目录固定为 /tmp/rdkwt/&lt;run-id&gt;，完成或失败后自动清理；开发机 GPU 不参与此步骤</p>
         <div id="board-upload-progress" class="progress hidden" role="progressbar" aria-label="板端输入上传进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
       </div>
       <footer class="dialog-footer"><span class="dialog-spacer"></span><button class="button ghost" data-close="board-run-create-dialog" type="button">取消</button><button class="button primary" type="submit">提交验证</button></footer>

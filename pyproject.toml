@@ -16,6 +16,7 @@ dependencies = [
   "jsonschema>=4.23,<5",
   "numpy>=1.26,<3",
   "paramiko>=4,<5",
+  "Pillow>=11,<13",
   "pydantic>=2.10,<3",
   "PyYAML>=6.0,<7",
   "sqlalchemy>=2.0,<3",

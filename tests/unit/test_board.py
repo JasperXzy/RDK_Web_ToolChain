@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -10,10 +11,12 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from PIL import Image
 from rdkwt_controller.application import BoardError, BoardService
 from rdkwt_controller.infrastructure.board import (
     BoardGateway,
     BoardGatewayError,
+    CommandResult,
     PinnedHostKeyPolicy,
     build_hrt_model_exec_args,
     detect_platform,
@@ -39,10 +42,17 @@ class FakeProfiles:
 
 
 class FakeConversionRuns:
-    def __init__(self, root: Path, *, platform: str = "s100") -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        platform: str = "s100",
+        configuration: dict[str, Any] | None = None,
+    ) -> None:
         self.path = root / "model.hbm"
         self.path.write_bytes(b"fake-hbm")
         self.platform = platform
+        self.configuration = configuration or {}
         self.run_id = "11111111-1111-1111-1111-111111111111"
         self.metadata = {
             "kind": "hbm",
@@ -61,6 +71,7 @@ class FakeConversionRuns:
             "kind": "CONVERSION",
             "status": "SUCCEEDED",
             "profile_id": f"{self.platform}-oe-3.7.0",
+            "request": {"configuration": self.configuration},
             "attempts": [{"number": 1}],
             "artifacts": [self.metadata],
         }
@@ -106,7 +117,7 @@ class FakeBoardGateway:
             else {"latency_avg_ms": 4.1, "latency_min_ms": 3.0, "latency_max_ms": 6.0, "fps": 240.0}
         )
         return {
-            "command": f"hrt_model_exec {mode} --model_file=<managed>",
+            "command": f"/usr/hobot/bin/hrt_model_exec {mode} --model_file=<managed>",
             "exit_code": 0,
             "metrics": metrics,
             "artifacts": [],
@@ -149,8 +160,10 @@ def _ready_device(app, *, fingerprint: str = "SHA256:" + "A" * 43) -> dict[str, 
     return service.probe(device["id"])
 
 
-def _configure_fake_conversion(app, root: Path) -> FakeConversionRuns:
-    conversion = FakeConversionRuns(root)
+def _configure_fake_conversion(
+    app, root: Path, *, configuration: dict[str, Any] | None = None
+) -> FakeConversionRuns:
+    conversion = FakeConversionRuns(root, configuration=configuration)
     app.state.services.repository.create(
         run=ConversionRun(
             id=conversion.run_id,
@@ -170,6 +183,30 @@ def _configure_fake_conversion(app, root: Path) -> FakeConversionRuns:
     app.state.services.board_service._runs = conversion
     app.state.services.board_service._profiles = FakeProfiles()
     return conversion
+
+
+def _nv12_configuration() -> dict[str, Any]:
+    return {
+        "inputs": [
+            {
+                "name": "input",
+                "target_shape": [1, 3, 224, 224],
+                "train_type": "rgb",
+                "train_layout": "NCHW",
+                "runtime_type": "nv12",
+            }
+        ],
+        "calibration": {
+            "source_type": "images",
+            "recipe": {"resize_short": 256, "crop_size": [224, 224]},
+        },
+    }
+
+
+def _png_bytes(*, size: tuple[int, int] = (640, 480)) -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", size, (32, 96, 160)).save(output, format="PNG")
+    return output.getvalue()
 
 
 def test_credential_store_encrypts_payload_and_uses_private_permissions(tmp_path: Path) -> None:
@@ -254,15 +291,35 @@ def test_board_commands_follow_openexplorer_3_7_runtime_contract() -> None:
         remote_dir=remote,
         options={"core_id": 2, "thread_num": 32, "perf_time_minutes": 3},
     )
+    nv12 = build_hrt_model_exec_args(
+        mode="infer",
+        remote_dir=remote,
+        options={
+            "core_id": 0,
+            "input_adapter": "nv12_image_y_uv",
+            "input_filename": "input.png",
+        },
+    )
 
     assert infer == [
-        "hrt_model_exec",
+        "/usr/hobot/bin/hrt_model_exec",
         "infer",
         f"--model_file={remote}/model.hbm",
         f"--input_file={remote}/input/input.npy",
         "--core_id=1",
         "--enable_dump=true",
-        "--dump_format=npy",
+        "--dump_format=bin",
+        f"--dump_path={remote}/output",
+    ]
+    assert nv12 == [
+        "/usr/hobot/bin/hrt_model_exec",
+        "infer",
+        f"--model_file={remote}/model.hbm",
+        f"--input_file={remote}/input/input.png,{remote}/input/input.png",
+        "--input_img_properties=Y,UV",
+        "--core_id=0",
+        "--enable_dump=true",
+        "--dump_format=bin",
         f"--dump_path={remote}/output",
     ]
     assert perf[-4:] == [
@@ -293,6 +350,55 @@ def test_unexpected_ssh_channel_close_is_not_reported_as_user_cancel() -> None:
         gateway._run(client, ["hrt_model_exec", "--version"], run_id=None)
 
     assert captured.value.code == "BOARD_CONNECTION_LOST"
+
+
+def test_remote_disk_uses_posix_df_and_enforces_required_space(monkeypatch) -> None:
+    gateway = BoardGateway(connect_timeout=1, command_timeout=1)
+    client = object()
+    commands: list[tuple[object, list[str], str | None]] = []
+
+    def run(remote_client, args, *, run_id):
+        commands.append((remote_client, args, run_id))
+        return CommandResult(
+            command="df -Pk /tmp",
+            exit_code=0,
+            stdout=(
+                "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                "/dev/mmcblk0p2 1048576 262144 786432 25% /\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(gateway, "_run", run)
+
+    assert gateway._remote_disk(client, required_bytes=786432 * 1024) == {
+        "path": "/tmp",
+        "total_bytes": 1048576 * 1024,
+        "free_bytes": 786432 * 1024,
+    }
+    assert commands == [(client, ["df", "-Pk", "/tmp"], None)]
+
+    with pytest.raises(BoardGatewayError) as insufficient:
+        gateway._remote_disk(client, required_bytes=786432 * 1024 + 1)
+    assert insufficient.value.code == "BOARD_REMOTE_DISK_INSUFFICIENT"
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        CommandResult(command="df -Pk /tmp", exit_code=1, stdout="", stderr="df failed"),
+        CommandResult(command="df -Pk /tmp", exit_code=0, stdout="invalid\n", stderr=""),
+    ],
+)
+def test_remote_disk_reports_command_and_output_errors(monkeypatch, result) -> None:
+    gateway = BoardGateway(connect_timeout=1, command_timeout=1)
+    monkeypatch.setattr(gateway, "_run", lambda *_args, **_kwargs: result)
+
+    with pytest.raises(BoardGatewayError) as captured:
+        gateway._remote_disk(object())
+
+    assert captured.value.code == "BOARD_DISK_CHECK_FAILED"
+    assert captured.value.command == "df -Pk /tmp"
 
 
 def test_device_probe_never_serializes_credentials(settings) -> None:
@@ -432,6 +538,77 @@ def test_model_info_infer_and_perf_are_persisted(settings, tmp_path: Path) -> No
     log_path, log_metadata = service.artifact_file(model_info["id"], 0)
     assert log_path.read_text() == "model_info ok\n"
     assert log_metadata["sha256"] == hashlib.sha256(log_path.read_bytes()).hexdigest()
+
+
+def test_nv12_infer_prepares_one_image_for_y_and_uv_inputs(settings, tmp_path: Path) -> None:
+    app = create_app(
+        settings,
+        docker_client=FakeDockerClient(),
+        board_gateway=FakeBoardGateway(),
+    )
+    device = _ready_device(app)
+    conversion = _configure_fake_conversion(
+        app,
+        tmp_path,
+        configuration=_nv12_configuration(),
+    )
+    source = _png_bytes()
+
+    run = asyncio.run(
+        app.state.services.board_service.submit(
+            device_id=device["id"],
+            conversion_run_id=conversion.run_id,
+            mode="infer",
+            options={"core_id": 0},
+            input_filename="photo.png",
+            input_chunks=_chunks(source),
+            content_length=len(source),
+        )
+    )
+
+    detail = app.state.services.board_service.get(run["id"])
+    input_dir = settings.board_runs_dir / run["id"] / "input"
+    prepared = input_dir / "input.png"
+    assert detail["options"]["input_adapter"] == "nv12_image_y_uv"
+    assert detail["options"]["input_filename"] == "input.png"
+    assert detail["options"]["input_size_bytes"] == prepared.stat().st_size
+    assert detail["options"]["input_sha256"] == hashlib.sha256(prepared.read_bytes()).hexdigest()
+    assert [path.name for path in input_dir.iterdir()] == ["input.png"]
+    with Image.open(prepared) as image:
+        assert image.format == "PNG"
+        assert image.mode == "RGB"
+        assert image.size == (224, 224)
+
+
+def test_nv12_infer_rejects_invalid_image_before_queueing(settings, tmp_path: Path) -> None:
+    app = create_app(
+        settings,
+        docker_client=FakeDockerClient(),
+        board_gateway=FakeBoardGateway(),
+    )
+    device = _ready_device(app)
+    conversion = _configure_fake_conversion(
+        app,
+        tmp_path,
+        configuration=_nv12_configuration(),
+    )
+    existing_directories = set(settings.board_runs_dir.iterdir())
+
+    with pytest.raises(BoardError) as captured:
+        asyncio.run(
+            app.state.services.board_service.submit(
+                device_id=device["id"],
+                conversion_run_id=conversion.run_id,
+                mode="infer",
+                options={"core_id": 0},
+                input_filename="broken.png",
+                input_chunks=_chunks(b"not-an-image"),
+                content_length=12,
+            )
+        )
+
+    assert captured.value.code == "BOARD_INPUT_IMAGE_INVALID"
+    assert set(settings.board_runs_dir.iterdir()) == existing_directories
 
 
 def test_board_run_api_and_device_api_hide_secrets(settings, tmp_path: Path) -> None:

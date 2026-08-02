@@ -20,6 +20,7 @@ _REMOTE_ROOT = re.compile(
     r"^/tmp/rdkwt/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
 _RUNTIME_INPUT_FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
+_HRT_MODEL_EXEC = "/usr/hobot/bin/hrt_model_exec"
 _FLOAT = r"([0-9]+(?:\.[0-9]+)?)"
 logger = logging.getLogger(__name__)
 
@@ -192,7 +193,7 @@ def build_hrt_model_exec_args(*, mode: str, remote_dir: str, options: dict[str, 
     """Build the complete, allowlisted argv defined by the OE 3.7 runtime contract."""
     if not _REMOTE_ROOT.fullmatch(remote_dir):
         raise BoardGatewayError("BOARD_REMOTE_PATH_INVALID", "remote workspace path is invalid")
-    args = ["hrt_model_exec", mode, f"--model_file={remote_dir}/model.hbm"]
+    args = [_HRT_MODEL_EXEC, mode, f"--model_file={remote_dir}/model.hbm"]
     if mode == "model_info":
         if options:
             raise BoardGatewayError("BOARD_OPTIONS_INVALID", "model_info does not accept options")
@@ -204,14 +205,33 @@ def build_hrt_model_exec_args(*, mode: str, remote_dir: str, options: dict[str, 
         filename = options.get("input_filename")
         if not isinstance(filename, str) or not _RUNTIME_INPUT_FILENAME.fullmatch(filename):
             raise BoardGatewayError("BOARD_INPUT_FILENAME_INVALID", "invalid runtime input name")
-        if set(options) - {"core_id", "input_filename", "input_size_bytes", "input_sha256"}:
+        if set(options) - {
+            "core_id",
+            "input_adapter",
+            "input_filename",
+            "input_size_bytes",
+            "input_sha256",
+        }:
             raise BoardGatewayError("BOARD_OPTIONS_INVALID", "infer contains unsupported options")
+        input_adapter = options.get("input_adapter", "raw")
+        if input_adapter not in {"raw", "nv12_image_y_uv"}:
+            raise BoardGatewayError("BOARD_INPUT_ADAPTER_INVALID", "invalid runtime input adapter")
+        remote_input = f"{remote_dir}/input/{filename}"
+        input_files = (
+            f"{remote_input},{remote_input}"
+            if input_adapter == "nv12_image_y_uv"
+            else remote_input
+        )
+        image_properties = (
+            ["--input_img_properties=Y,UV"] if input_adapter == "nv12_image_y_uv" else []
+        )
         return [
             *args,
-            f"--input_file={remote_dir}/input/{filename}",
+            f"--input_file={input_files}",
+            *image_properties,
             f"--core_id={core_id}",
             "--enable_dump=true",
-            "--dump_format=npy",
+            "--dump_format=bin",
             f"--dump_path={remote_dir}/output",
         ]
     if mode != "perf":
@@ -274,14 +294,15 @@ class BoardGateway:
                         "/sys/devices/soc0/soc_id",
                     ),
                 )
-                disk = self._remote_disk(sftp)
+                disk = self._remote_disk(client)
             finally:
                 sftp.close()
             uname = self._run(client, ["uname", "-a"], run_id=None)
-            version = self._run(client, ["hrt_model_exec", "--version"], run_id=None)
+            version = self._run(client, [_HRT_MODEL_EXEC, "--version"], run_id=None)
             if version.exit_code != 0:
                 raise BoardGatewayError(
-                    "BOARD_TOOL_UNAVAILABLE", "hrt_model_exec --version failed on the device"
+                    "BOARD_TOOL_UNAVAILABLE",
+                    f"{_HRT_MODEL_EXEC} --version failed on the device",
                 )
             detected = detect_platform(os_release, board_model, uname.stdout)
             if detected is None:
@@ -330,7 +351,7 @@ class BoardGateway:
                     required_bytes += (
                         (local_dir / "input" / options["input_filename"]).stat().st_size
                     )
-                self._remote_disk(sftp, required_bytes=required_bytes)
+                self._remote_disk(client, required_bytes=required_bytes)
                 self._mkdirs(sftp, remote_dir)
                 remote_hbm = f"{remote_dir}/model.hbm"
                 sftp.put(
@@ -599,16 +620,31 @@ class BoardGateway:
                 return value
         return ""
 
-    @staticmethod
-    def _remote_disk(sftp: paramiko.SFTPClient, *, required_bytes: int = 0) -> dict[str, int | str]:
+    def _remote_disk(
+        self, client: paramiko.SSHClient, *, required_bytes: int = 0
+    ) -> dict[str, int | str]:
+        result = self._run(client, ["df", "-Pk", "/tmp"], run_id=None)
         try:
-            filesystem = sftp.statvfs("/tmp")
-        except OSError as exc:
+            if result.exit_code != 0:
+                raise ValueError("df command failed")
+            lines = [line for line in result.stdout.splitlines() if line.strip()]
+            fields = lines[-1].split()
+            if len(fields) < 6:
+                raise ValueError("unexpected df output")
+            total_kib = int(fields[-5])
+            free_kib = int(fields[-3])
+            if total_kib < 0 or free_kib < 0:
+                raise ValueError("negative df values")
+        except (IndexError, ValueError) as exc:
             raise BoardGatewayError(
-                "BOARD_DISK_CHECK_FAILED", "unable to inspect free space in /tmp"
+                "BOARD_DISK_CHECK_FAILED",
+                "unable to inspect free space in /tmp",
+                command=result.command,
+                stdout=result.stdout.encode("utf-8"),
+                stderr=result.stderr.encode("utf-8"),
             ) from exc
-        total_bytes = filesystem.f_frsize * filesystem.f_blocks
-        free_bytes = filesystem.f_frsize * filesystem.f_bavail
+        total_bytes = total_kib * 1024
+        free_bytes = free_kib * 1024
         disk: dict[str, int | str] = {
             "path": "/tmp",
             "total_bytes": total_bytes,

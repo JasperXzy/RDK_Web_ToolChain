@@ -29,7 +29,8 @@ node --check services/controller/rdkwt_controller/web/app.js
 2. 首次探测核对弹出的 Host Key 指纹；拒绝后不应连接，确认并保存后再次探测。
 3. 探测必须显示正确平台、OS、`hrt_model_exec` 版本、SFTP 和 `/tmp` 空间。
 4. 选择同平台成功转换，运行 `model_info`；核对模型名、输入和输出，并下载原始日志。
-5. 上传与模型输入契合的数据运行 `infer`；核对推理延迟，下载并检查 dump NPY。
+5. 对 NV12 图像模型上传一张 JPG/PNG 运行 `infer`；确认图片按转换配置缩放和中心裁剪，并自动
+   映射为 Y、UV 两个物理输入。核对推理延迟，下载并检查 dump BIN。
 6. 分别按帧数和按分钟运行 `perf`；核对平均/最低/最高延迟、FPS 和 profile 文件。
 7. 启动长时间 `perf` 后取消；任务应进入 `CANCELLED`，SSH Channel 关闭，远端临时目录清理。
 8. 用错误平台 HBM、错误 Host Key、错误凭据和缺失工具各执行一次负向测试；必须在上传/执行前

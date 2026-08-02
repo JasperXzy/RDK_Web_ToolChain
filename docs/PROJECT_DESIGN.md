@@ -1609,13 +1609,19 @@ Controller 启动时：
 
 仅允许：
 
-- `hrt_model_exec --version`。
-- `hrt_model_exec model_info`。
-- `hrt_model_exec infer`。
-- `hrt_model_exec perf`。
+- `df -Pk /tmp`。
+- `uname -a`。
+- `/usr/hobot/bin/hrt_model_exec --version`。
+- `/usr/hobot/bin/hrt_model_exec model_info`。
+- `/usr/hobot/bin/hrt_model_exec infer`。
+- `/usr/hobot/bin/hrt_model_exec perf`。
 - 必要的 `mkdir`、`chmod`、`rm`，且目标必须位于任务远端目录。
 
 不提供任意终端入口。
+
+NV12 单逻辑输入模型的 `infer` 接收一张 JPG/PNG。Controller 按转换任务中固化的图片配方缩放、
+中心裁剪并生成固定 RGB PNG，再将同一文件以 `Y,UV` 映射为 HBM 的两个物理输入；输出固定使用
+板端运行时支持的 BIN dump。非 NV12 模型仍接收与 Runtime 输入直接匹配的原始文件。
 
 ### 20.5 性能结果
 

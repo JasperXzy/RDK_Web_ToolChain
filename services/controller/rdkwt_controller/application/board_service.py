@@ -7,9 +7,12 @@ import os
 import re
 import threading
 import uuid
+import warnings
 from collections.abc import AsyncIterator
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Any
+
+from PIL import Image
 
 from rdkwt_controller.application.run_service import RunService
 from rdkwt_controller.infrastructure.board import (
@@ -26,6 +29,10 @@ _FINGERPRINT = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 _FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _INPUT_SUFFIXES = {".bin", ".jpeg", ".jpg", ".npy", ".png", ".txt"}
+_IMAGE_INPUT_SUFFIXES = {".jpeg", ".jpg", ".png"}
+_MAX_IMAGE_PIXELS = 64_000_000
+_MAX_IMAGE_SIDE = 8_192
+_NV12_IMAGE_ADAPTER = "nv12_image_y_uv"
 
 
 class BoardError(RuntimeError):
@@ -313,6 +320,7 @@ class BoardService:
                 "BOARD_HBM_TOO_LARGE", "HBM exceeds the configured board upload limit", 413
             )
         self._validate_options(mode, device["platform"], options)
+        input_plan = self._nv12_image_plan(conversion) if mode == "infer" else None
         run_id = str(uuid.uuid4())
         local_dir = self._settings.board_runs_dir / run_id
         local_dir.mkdir(parents=True, exist_ok=False)
@@ -330,12 +338,41 @@ class BoardService:
                     )
                 input_dir = local_dir / "input"
                 input_dir.mkdir()
-                input_metadata = await self._write_input(
-                    input_dir / safe_name, input_chunks, self._settings.board_max_upload_bytes
-                )
+                if input_plan is None:
+                    prepared_name = safe_name
+                    input_metadata = await self._write_input(
+                        input_dir / prepared_name,
+                        input_chunks,
+                        self._settings.board_max_upload_bytes,
+                    )
+                    adapter_options: dict[str, Any] = {}
+                else:
+                    suffix = PurePath(safe_name).suffix.lower()
+                    if suffix not in _IMAGE_INPUT_SUFFIXES:
+                        raise BoardError(
+                            "BOARD_INPUT_FORMAT_INVALID",
+                            "NV12 inference requires one JPEG or PNG image",
+                        )
+                    source = input_dir / f"source{suffix}"
+                    await self._write_input(
+                        source,
+                        input_chunks,
+                        self._settings.board_max_upload_bytes,
+                    )
+                    prepared_name = "input.png"
+                    input_metadata = await asyncio.to_thread(
+                        self._prepare_nv12_image,
+                        source,
+                        input_dir / prepared_name,
+                        input_plan,
+                        self._settings.board_max_upload_bytes,
+                    )
+                    source.unlink()
+                    adapter_options = {"input_adapter": _NV12_IMAGE_ADAPTER}
                 options = {
                     **options,
-                    "input_filename": safe_name,
+                    **adapter_options,
+                    "input_filename": prepared_name,
                     "input_size_bytes": input_metadata["size_bytes"],
                     "input_sha256": input_metadata["sha256"],
                 }
@@ -596,8 +633,11 @@ class BoardService:
             cls._validate_options(mode, platform, options)
             return
         expected = {"core_id", "input_filename", "input_size_bytes", "input_sha256"}
-        if set(options) != expected:
+        option_keys = frozenset(options)
+        if option_keys not in {frozenset(expected), frozenset(expected | {"input_adapter"})}:
             raise BoardError("BOARD_OPTIONS_INVALID", "infer task metadata is incomplete")
+        if options.get("input_adapter", "raw") not in {"raw", _NV12_IMAGE_ADAPTER}:
+            raise BoardError("BOARD_INPUT_ADAPTER_INVALID", "infer input adapter is invalid")
         if type(options["input_size_bytes"]) is not int or options["input_size_bytes"] <= 0:
             raise BoardError("BOARD_OPTIONS_INVALID", "infer input size is invalid")
         if not isinstance(options["input_sha256"], str) or not _SHA256.fullmatch(
@@ -671,6 +711,133 @@ class BoardService:
                 "input must use a hrt_model_exec-supported extension",
             )
         return value
+
+    @staticmethod
+    def _nv12_image_plan(conversion: dict[str, Any]) -> dict[str, int] | None:
+        request = conversion.get("request")
+        configuration = request.get("configuration") if isinstance(request, dict) else None
+        inputs = configuration.get("inputs") if isinstance(configuration, dict) else None
+        if not isinstance(inputs, list) or not any(
+            isinstance(item, dict) and item.get("runtime_type") == "nv12" for item in inputs
+        ):
+            return None
+        if len(inputs) != 1 or not isinstance(inputs[0], dict):
+            raise BoardError(
+                "BOARD_INPUT_ADAPTER_UNSUPPORTED",
+                "single-image NV12 inference requires exactly one logical model input",
+            )
+        input_config = inputs[0]
+        target_shape = input_config.get("target_shape")
+        layout = input_config.get("train_layout")
+        if (
+            not isinstance(target_shape, list)
+            or len(target_shape) != 4
+            or any(type(value) is not int or value <= 0 for value in target_shape)
+            or layout not in {"NCHW", "NHWC"}
+        ):
+            raise BoardError(
+                "BOARD_INPUT_CONFIGURATION_INVALID",
+                "NV12 input shape or layout is missing from the conversion snapshot",
+            )
+        batch = target_shape[0]
+        channels = target_shape[1] if layout == "NCHW" else target_shape[3]
+        height = target_shape[2] if layout == "NCHW" else target_shape[1]
+        width = target_shape[3] if layout == "NCHW" else target_shape[2]
+        if (
+            batch != 1
+            or channels != 3
+            or height % 2
+            or width % 2
+            or height > _MAX_IMAGE_SIDE
+            or width > _MAX_IMAGE_SIDE
+            or height * width > _MAX_IMAGE_PIXELS
+        ):
+            raise BoardError(
+                "BOARD_INPUT_CONFIGURATION_INVALID",
+                "NV12 single-image inference requires batch 1 and even three-channel dimensions",
+            )
+
+        resize_short = max(height, width)
+        calibration = configuration.get("calibration")
+        recipe = calibration.get("recipe") if isinstance(calibration, dict) else None
+        if isinstance(recipe, dict):
+            recipe_crop = recipe.get("crop_size")
+            configured_resize = recipe.get("resize_short")
+            if recipe_crop != [height, width] or type(configured_resize) is not int:
+                raise BoardError(
+                    "BOARD_INPUT_CONFIGURATION_INVALID",
+                    "image preprocessing recipe does not match the model input shape",
+                )
+            resize_short = configured_resize
+        if not min(height, width) <= resize_short <= _MAX_IMAGE_SIDE:
+            raise BoardError(
+                "BOARD_INPUT_CONFIGURATION_INVALID",
+                "image preprocessing resize value is outside the supported range",
+            )
+        return {"resize_short": resize_short, "crop_height": height, "crop_width": width}
+
+    @classmethod
+    def _prepare_nv12_image(
+        cls,
+        source: Path,
+        destination: Path,
+        plan: dict[str, int],
+        limit: int,
+    ) -> dict[str, Any]:
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(source) as opened:
+                    if opened.format not in {"JPEG", "PNG"} or getattr(opened, "n_frames", 1) != 1:
+                        raise ValueError("unsupported or animated image")
+                    width, height = opened.size
+                    if (
+                        width <= 0
+                        or height <= 0
+                        or width > _MAX_IMAGE_SIDE
+                        or height > _MAX_IMAGE_SIDE
+                        or width * height > _MAX_IMAGE_PIXELS
+                    ):
+                        raise ValueError("image dimensions are outside the supported range")
+                    image = opened.convert("RGB")
+
+            short = plan["resize_short"]
+            if width <= height:
+                resized = (short, max(short, round(height * short / width)))
+            else:
+                resized = (max(short, round(width * short / height)), short)
+            if resized[0] * resized[1] > _MAX_IMAGE_PIXELS:
+                raise ValueError("resized image is too large")
+            image = image.resize(resized, Image.Resampling.BILINEAR)
+            crop_width = plan["crop_width"]
+            crop_height = plan["crop_height"]
+            left = (image.width - crop_width) // 2
+            top = (image.height - crop_height) // 2
+            if left < 0 or top < 0:
+                raise ValueError("resized image is smaller than the model input")
+            image = image.crop((left, top, left + crop_width, top + crop_height))
+            with temporary.open("xb") as handle:
+                image.save(handle, format="PNG")
+                handle.flush()
+                os.fsync(handle.fileno())
+            size = temporary.stat().st_size
+            if size > limit:
+                raise BoardError(
+                    "BOARD_INPUT_TOO_LARGE", "prepared input exceeds the board upload limit", 413
+                )
+            os.replace(temporary, destination)
+            return {"size_bytes": size, "sha256": cls._sha256(destination)}
+        except BoardError:
+            raise
+        except Exception as exc:
+            raise BoardError(
+                "BOARD_INPUT_IMAGE_INVALID",
+                "input is not a valid, supported JPEG or PNG image",
+            ) from exc
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
     @staticmethod
     def _sha256(path: Path) -> str:

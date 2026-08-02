@@ -26,11 +26,13 @@ M3 已在 CPU OpenExplorer 3.7 Runner 中完成 S100/S600 HBM 生成、数值验
 4. 远端工作区固定为 `/tmp/rdkwt/<board-run-uuid>`。目录、上传、下载与清理由 SFTP API
    完成，拒绝中间符号链接；不接受来自 API 的远端路径。完成、失败或取消后默认清理，可由
    管理员用 `RDKWT_BOARD_KEEP_REMOTE=true` 暂时保留用于受控排障。
-5. 唯一允许的远端可执行程序是 `uname` 和 `hrt_model_exec`。探测固定调用
-   `hrt_model_exec --version`；任务固定调用 `model_info`、`infer` 或 `perf`。参数从 UUID、受限
-   文件名、平台 Core 白名单和有界整数生成，再用 `shlex.join` 编码；API 不接受命令、Shell、
-   环境变量、工具路径或额外参数。
-6. `model_info` 保存模型输入输出结构和原始日志；`infer` 保存延迟和 dump NPY；`perf` 保存
+5. 唯一允许的远端可执行程序是 `df`、`uname` 和固定路径
+   `/usr/hobot/bin/hrt_model_exec`。探测固定调用 `df -Pk /tmp`、`uname -a` 和
+   `/usr/hobot/bin/hrt_model_exec --version`；任务上传前也固定调用 `df -Pk /tmp`，任务执行只允许
+   `model_info`、`infer` 或 `perf`。参数从 UUID、受限文件名、平台 Core 白名单和有界整数生成，
+   再用 `shlex.join` 编码。NV12 单图推理只允许固定的 `Y,UV` 输入映射和 `bin` dump；API 不接受
+   命令、Shell、环境变量、工具路径或额外参数。
+6. `model_info` 保存模型输入输出结构和原始日志；`infer` 保存延迟和 dump BIN；`perf` 保存
    平均/最低/最高延迟、FPS 和 profile 文件。下载时再次核对路径、类型、大小和 SHA-256。
    命令输出、上传和下载都有上限。
 7. 板端任务使用独立 SQLite 持久队列和单并发 Worker。排队任务在重启后继续；正在运行的
