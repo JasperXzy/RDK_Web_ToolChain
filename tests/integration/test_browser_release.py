@@ -93,3 +93,8 @@ def test_headless_browser_initializes_workbench(settings, tmp_path) -> None:
     assert 'id="maintenance-view"' in result.stdout
     assert "正在检查环境" not in result.stdout
     assert "环境可用" in result.stdout
+    assert 'id="run-filter-trigger"' in result.stdout
+    assert 'id="device-platform-trigger"' in result.stdout
+    assert 'id="compile-mode-trigger"' in result.stdout
+    assert "设备管理" not in result.stdout
+    assert "Host Key 可先留空；首次探测只显示指纹，确认后才会建立信任" not in result.stdout

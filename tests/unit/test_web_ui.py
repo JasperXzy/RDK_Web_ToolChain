@@ -156,13 +156,63 @@ def test_asset_uploads_use_compact_single_entry_workflows() -> None:
     assert "暂无校准数据集" in JAVASCRIPT
 
 
+def test_board_and_maintenance_panels_keep_only_primary_titles() -> None:
+    assert '<div class="panel-heading"><h2>受信任设备</h2></div>' in HTML
+    assert '<div class="panel-heading"><h2>板端验证历史</h2>' in HTML
+    assert '<div class="panel-heading"><h2>可回收空间</h2>' in HTML
+    assert '<div class="panel-heading"><h2>本地备份</h2></div>' in HTML
+    assert '<span class="step-label">设备</span>' not in HTML
+    assert '<span class="step-label">板端任务</span>' not in HTML
+    assert '<span class="step-label">安全清理</span>' not in HTML
+    assert '<span class="step-label">备份与恢复</span>' not in HTML
+    removed_copy = (
+        "尚未添加开发板",
+        "设备探测成功、且已有 HBM 后即可运行 model_info / infer / perf",
+        "首次探测必须确认 SHA256 Host Key",
+        "尚未预览",
+        "缓存不进入备份",
+        "当前没有活动任务；执行前仍会重新核对文件列表与一次性确认令牌",
+        "恢复必须停服执行",
+    )
+    for copy in removed_copy:
+        assert copy not in HTML
+        assert copy not in JAVASCRIPT
+    assert 'id="device-list" class="device-grid"></div>' in HTML
+    assert 'id="board-run-list" class="run-list"></div>' in HTML
+    assert 'id="cleanup-total" class="hint"></span>' in HTML
+    assert '$("#cleanup-note")' not in JAVASCRIPT
+
+
+def test_dialog_headers_keep_only_primary_titles() -> None:
+    headers = re.findall(r'<header class="dialog-header[^>]*>.*?</header>', HTML, re.DOTALL)
+    assert len(headers) == 8
+    assert all("<h2" in header for header in headers)
+    assert all('class="eyebrow"' not in header for header in headers)
+    assert all("<p" not in header for header in headers)
+    assert "设备管理" not in HTML
+    assert "Host Key 可先留空；首次探测只显示指纹，确认后才会建立信任" not in HTML
+    assert "只允许上传已完成转换的 HBM，并调用白名单内的 hrt_model_exec 模式" not in HTML
+    assert "同一模型的结构化指标" not in HTML
+    assert "不会静默拉取镜像，也不会向外部发送模型数据" not in HTML
+    for removed_id in ("wizard-draft-status", "board-run-subtitle", "comparison-subtitle", "run-kind", "run-subtitle"):
+        assert f'id="{removed_id}"' not in HTML
+        assert f'$("#{removed_id}")' not in JAVASCRIPT
+
+
 def test_workspace_selects_use_accessible_custom_popovers() -> None:
-    assert HTML.count('data-custom-select') == 2
+    assert HTML.count('data-custom-select') == 3
     assert HTML.count('role="combobox"') == 2
-    assert HTML.count('role="listbox"') == 2
+    assert HTML.count('role="listbox"') == 3
     assert 'id="calibration-source-type-trigger"' in HTML
     assert 'id="calibration-version-select-trigger"' in HTML
-    assert "function initializeCustomSelects()" in JAVASCRIPT
+    assert "function initializeCustomSelects(scope = document)" in JAVASCRIPT
+    assert "function enhanceNativeSelect(select)" in JAVASCRIPT
+    assert "function enhanceNativeSelects(scope = document)" in JAVASCRIPT
+    assert 'select:not(.custom-select-native)' in JAVASCRIPT
+    assert 'root.dataset.customSelect = ""' in JAVASCRIPT
+    assert 'trigger.setAttribute("role", "combobox")' in JAVASCRIPT
+    assert 'select.addEventListener("invalid"' in JAVASCRIPT
+    assert "initializeCustomSelects(root)" in JAVASCRIPT
     assert "function handleCustomSelectKeydown(event, instance)" in JAVASCRIPT
     assert '["ArrowDown", "ArrowUp"]' in JAVASCRIPT
     assert '["Home", "End"]' in JAVASCRIPT
@@ -173,10 +223,29 @@ def test_workspace_selects_use_accessible_custom_popovers() -> None:
     assert 'classList.toggle("opens-upward", opensUpward)' in JAVASCRIPT
     assert "instance.menu.scrollTop = activeBottom - instance.menu.clientHeight" in JAVASCRIPT
     assert 'window.addEventListener("scroll", repositionOpenSelects, {passive: true})' in JAVASCRIPT
+    assert 'document.addEventListener("scroll", repositionOpenSelects, {capture: true, passive: true})' in JAVASCRIPT
     assert ".custom-select-menu {" in CSS
     assert ".custom-select.opens-upward .custom-select-menu" in CSS
     assert "right: 14px" in CSS
     assert "max-height: 240px" in CSS
+
+
+def test_run_comparison_uses_aligned_bounded_multiselect() -> None:
+    assert 'id="comparison-runs" class="custom-select-native" multiple' in HTML
+    assert 'data-max-selections="4"' in HTML
+    assert 'aria-multiselectable="true"' in HTML
+    assert 'id="comparison-runs-count"' in HTML
+    assert "function customSelectMaxSelections(instance)" in JAVASCRIPT
+    assert "if (instance.select.multiple)" in JAVASCRIPT
+    assert "option.selected = !option.selected" in JAVASCRIPT
+    assert "customSelectSelectedCount(instance) >= customSelectMaxSelections(instance)" in JAVASCRIPT
+    assert "refreshCustomSelect(select)" in JAVASCRIPT
+    assert 'classList.add("custom-select-option-multiple")' in JAVASCRIPT
+    assert "event.composedPath()" in JAVASCRIPT
+    assert ".custom-select-count {" in CSS
+    assert ".custom-select-option-multiple" in CSS
+    assert ".custom-select-checkbox" in CSS
+    assert ".comparison-picker select { min-height: 78px" not in CSS
 
 
 def test_run_rows_do_not_repeat_terminal_status_as_stage() -> None:

@@ -38,6 +38,8 @@ const state = {
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const customSelects = new Map();
+let customSelectSequence = 0;
+let customSelectEventsInitialized = false;
 const el = (tag, className, text) => {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -45,6 +47,84 @@ const el = (tag, className, text) => {
   return node;
 };
 const scrollBehavior = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+
+function enhanceNativeSelect(select) {
+  if (select.classList.contains("custom-select-native")) return select;
+  if (!select.id) {
+    customSelectSequence += 1;
+    select.id = `custom-select-${customSelectSequence}`;
+  }
+  const triggerId = `${select.id}-trigger`;
+  const valueId = `${select.id}-value`;
+  const menuId = `${select.id}-listbox`;
+  const ownerLabel = select.closest("label");
+  let field = select.closest(".field-control");
+  let label = document.querySelector(`label[for="${select.id}"]`);
+
+  if (ownerLabel) {
+    const labelText = [...ownerLabel.childNodes]
+      .filter((node) => node.nodeType === Node.TEXT_NODE)
+      .map((node) => node.textContent.trim())
+      .filter(Boolean)
+      .join(" ") || select.getAttribute("aria-label") || "选择";
+    field = el("div", ownerLabel.className);
+    [...ownerLabel.attributes].forEach((attribute) => {
+      if (!["class", "for"].includes(attribute.name)) field.setAttribute(attribute.name, attribute.value);
+    });
+    field.classList.add("field-control");
+    label = el("label", "", labelText);
+    ownerLabel.replaceWith(field);
+    field.append(label);
+  }
+
+  if (!field) {
+    field = el("div", "field-control");
+    select.replaceWith(field);
+  }
+
+  const labelId = label?.id || `${select.id}-label`;
+  if (label) {
+    label.id = labelId;
+    label.htmlFor = triggerId;
+  }
+
+  const root = el("div", "custom-select auto-custom-select");
+  root.dataset.customSelect = "";
+  const trigger = el("button", "custom-select-trigger");
+  trigger.id = triggerId;
+  trigger.type = "button";
+  trigger.setAttribute("role", "combobox");
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.setAttribute("aria-controls", menuId);
+  if (label) trigger.setAttribute("aria-labelledby", `${labelId} ${valueId}`);
+  else trigger.setAttribute("aria-label", select.getAttribute("aria-label") || "选择");
+  const value = el("span", "custom-select-value", "请选择");
+  value.id = valueId;
+  trigger.append(value, el("span", "custom-select-chevron"));
+  const menu = el("div", "custom-select-menu hidden");
+  menu.id = menuId;
+  menu.setAttribute("role", "listbox");
+  if (label) menu.setAttribute("aria-labelledby", labelId);
+  else menu.setAttribute("aria-label", select.getAttribute("aria-label") || "可选项");
+
+  if (select.isConnected) select.replaceWith(root);
+  else field.append(root);
+  select.classList.add("custom-select-native");
+  select.tabIndex = -1;
+  select.setAttribute("aria-hidden", "true");
+  if (label) select.setAttribute("aria-labelledby", labelId);
+  root.append(select, trigger, menu);
+  return select;
+}
+
+function enhanceNativeSelects(scope = document) {
+  const selects = [
+    ...(scope.matches?.("select:not(.custom-select-native)") ? [scope] : []),
+    ...scope.querySelectorAll("select:not(.custom-select-native)"),
+  ];
+  selects.forEach(enhanceNativeSelect);
+}
 
 function customSelectFocusTarget(control) {
   return customSelects.get(control?.id)?.trigger || control;
@@ -68,10 +148,14 @@ function positionCustomSelect(instance) {
   const triggerRect = instance.trigger.getBoundingClientRect();
   const mobileNavigation = $(".mobile-nav");
   const navigationVisible = mobileNavigation && getComputedStyle(mobileNavigation).display !== "none";
-  const viewportBottom = navigationVisible ? mobileNavigation.getBoundingClientRect().top : window.innerHeight;
+  const clippingParent = instance.root.closest(".wizard-body, .project-form-body, .device-form-body, .board-run-detail, .run-body");
+  const clippingRect = clippingParent?.getBoundingClientRect();
+  const viewportTop = clippingRect ? Math.max(0, clippingRect.top) : 0;
+  const navigationTop = navigationVisible ? mobileNavigation.getBoundingClientRect().top : window.innerHeight;
+  const viewportBottom = clippingRect ? Math.min(navigationTop, clippingRect.bottom) : navigationTop;
   const desiredHeight = Math.min(instance.menu.scrollHeight, 240);
   const availableBelow = Math.max(0, viewportBottom - triggerRect.bottom - 8);
-  const availableAbove = Math.max(0, triggerRect.top - 8);
+  const availableAbove = Math.max(0, triggerRect.top - viewportTop - 8);
   const opensUpward = availableBelow < desiredHeight && availableAbove > availableBelow;
   instance.root.classList.toggle("opens-upward", opensUpward);
   const availableHeight = opensUpward ? availableAbove : availableBelow;
@@ -79,15 +163,36 @@ function positionCustomSelect(instance) {
 }
 
 function closeCustomSelects(except = null) {
-  customSelects.forEach((instance) => {
+  customSelects.forEach((instance, selectId) => {
+    if (!instance.root.isConnected) {
+      customSelects.delete(selectId);
+      return;
+    }
     if (instance !== except) closeCustomSelect(instance);
   });
+}
+
+function customSelectMaxSelections(instance) {
+  const maximum = Number(instance.root.dataset.maxSelections);
+  return Number.isInteger(maximum) && maximum > 0 ? maximum : Infinity;
+}
+
+function customSelectSelectedCount(instance) {
+  return [...instance.select.options]
+    .filter((option) => option.selected && option.value !== "")
+    .length;
+}
+
+function customSelectOptionDisabled(instance, option) {
+  if (option.disabled || option.value === "") return true;
+  if (!instance.select.multiple || option.selected) return false;
+  return customSelectSelectedCount(instance) >= customSelectMaxSelections(instance);
 }
 
 function customSelectEnabledIndexes(instance) {
   return [...instance.select.options]
     .map((option, index) => ({option, index}))
-    .filter(({option}) => !option.disabled && option.value !== "")
+    .filter(({option}) => !customSelectOptionDisabled(instance, option))
     .map(({index}) => index);
 }
 
@@ -122,7 +227,14 @@ function moveCustomSelectActive(instance, direction) {
 
 function selectCustomOption(instance, index) {
   const option = instance.select.options[index];
-  if (!option || option.disabled || option.value === "") return;
+  if (!option || customSelectOptionDisabled(instance, option)) return;
+  if (instance.select.multiple) {
+    option.selected = !option.selected;
+    instance.select.dispatchEvent(new Event("change", {bubbles: true}));
+    setCustomSelectActive(instance, index);
+    positionCustomSelect(instance);
+    return;
+  }
   instance.select.value = option.value;
   instance.select.dispatchEvent(new Event("change", {bubbles: true}));
   closeCustomSelect(instance);
@@ -134,24 +246,41 @@ function refreshCustomSelect(control) {
   if (!instance) return;
   const options = [...instance.select.options];
   const selected = options.find((option) => option.selected) || options[0];
-  instance.value.textContent = selected?.dataset.label || selected?.textContent || "请选择";
-  instance.trigger.disabled = instance.select.disabled;
+  const selectedOptions = options.filter((option) => option.selected && option.value !== "");
+  if (instance.select.multiple) {
+    const selectedCount = selectedOptions.length;
+    const maximum = customSelectMaxSelections(instance);
+    instance.value.textContent = selectedCount === 1
+      ? (selectedOptions[0].dataset.label || selectedOptions[0].textContent)
+      : selectedCount > 1 ? `已选择 ${selectedCount} 个模型` : "选择成功转换";
+    if (instance.count) instance.count.textContent = `${selectedCount}/${Number.isFinite(maximum) ? maximum : options.length}`;
+    instance.trigger.disabled = instance.select.disabled || !options.some((option) => !option.disabled && option.value !== "");
+  } else {
+    instance.value.textContent = selected?.dataset.label || selected?.textContent || "请选择";
+    instance.trigger.disabled = instance.select.disabled;
+  }
   instance.menu.replaceChildren();
   options.forEach((option, index) => {
-    if (option.value === "" && option.disabled) return;
+    if (option.value === "") return;
+    const disabled = customSelectOptionDisabled(instance, option);
     const item = el("button", "custom-select-option");
     item.type = "button";
     item.id = `${instance.select.id}-option-${index}`;
     item.dataset.optionIndex = String(index);
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", String(option.selected));
-    item.setAttribute("aria-disabled", String(option.disabled));
+    item.setAttribute("aria-disabled", String(disabled));
     item.tabIndex = -1;
-    item.disabled = option.disabled;
+    item.disabled = disabled;
     const copy = el("span", "custom-select-option-copy");
     copy.append(el("strong", "", option.dataset.label || option.textContent));
     if (option.dataset.description) copy.append(el("small", "", option.dataset.description));
-    item.append(copy, el("span", "custom-select-check", "✓"));
+    if (instance.select.multiple) {
+      item.classList.add("custom-select-option-multiple");
+      item.append(el("span", "custom-select-checkbox", "✓"), copy);
+    } else {
+      item.append(copy, el("span", "custom-select-check", "✓"));
+    }
     item.addEventListener("click", () => selectCustomOption(instance, index));
     instance.menu.append(item);
   });
@@ -203,24 +332,44 @@ function handleCustomSelectKeydown(event, instance) {
   }
 }
 
-function initializeCustomSelects() {
-  $$('[data-custom-select]').forEach((root) => {
+function refreshCustomSelects(scope = document) {
+  scope.querySelectorAll("select.custom-select-native").forEach((select) => refreshCustomSelect(select));
+}
+
+function initializeCustomSelects(scope = document) {
+  enhanceNativeSelects(scope);
+  scope.querySelectorAll('[data-custom-select]').forEach((root) => {
     const select = root.querySelector("select");
+    if (!select || customSelects.has(select.id)) return;
     const trigger = root.querySelector(".custom-select-trigger");
     const menu = root.querySelector(".custom-select-menu");
     const value = root.querySelector(".custom-select-value");
-    const instance = {root, select, trigger, menu, value, activeIndex: -1};
+    const count = root.querySelector(".custom-select-count");
+    const instance = {root, select, trigger, menu, value, count, activeIndex: -1};
     customSelects.set(select.id, instance);
     trigger.addEventListener("click", () => {
       if (trigger.getAttribute("aria-expanded") === "true") closeCustomSelect(instance);
       else openCustomSelect(instance);
     });
     trigger.addEventListener("keydown", (event) => handleCustomSelectKeydown(event, instance));
-    select.addEventListener("change", () => refreshCustomSelect(select));
+    select.addEventListener("change", () => {
+      if (!select.required || select.value) trigger.removeAttribute("aria-invalid");
+      refreshCustomSelect(select);
+    });
+    select.addEventListener("invalid", (event) => {
+      event.preventDefault();
+      trigger.setAttribute("aria-invalid", "true");
+      trigger.focus({preventScroll: true});
+    });
+    select.form?.addEventListener("reset", () => requestAnimationFrame(() => refreshCustomSelect(select)));
     refreshCustomSelect(select);
   });
+  if (customSelectEventsInitialized) return;
+  customSelectEventsInitialized = true;
   document.addEventListener("click", (event) => {
-    if (!event.target.closest("[data-custom-select]")) closeCustomSelects();
+    const insideCustomSelect = event.composedPath()
+      .some((node) => node instanceof Element && node.matches("[data-custom-select]"));
+    if (!insideCustomSelect) closeCustomSelects();
   });
   const repositionOpenSelects = () => {
     customSelects.forEach((instance) => {
@@ -229,6 +378,7 @@ function initializeCustomSelects() {
   };
   window.addEventListener("resize", repositionOpenSelects);
   window.addEventListener("scroll", repositionOpenSelects, {passive: true});
+  document.addEventListener("scroll", repositionOpenSelects, {capture: true, passive: true});
 }
 
 function toast(message, error = false) {
@@ -779,9 +929,12 @@ function populateComparisonRuns() {
         `${run.profile_id} · 模型 ${run.model_version_id.slice(0, 8)} · ${run.runner_mode || "cpu"} · ${run.id.slice(0, 8)} · ${project?.name || "未知项目"}`,
         run.id,
       );
+      option.dataset.label = `${run.profile_id} · ${project?.name || "未知项目"}`;
+      option.dataset.description = `模型 ${run.model_version_id.slice(0, 8)} · ${run.runner_mode || "cpu"} · 任务 ${run.id.slice(0, 8)}`;
       option.selected = selected.has(run.id);
       select.add(option);
     });
+  refreshCustomSelect(select);
   updateComparisonButton();
 }
 
@@ -810,7 +963,6 @@ function renderComparison(comparison) {
   };
   const root = $("#comparison-result");
   root.replaceChildren();
-  $("#comparison-subtitle").textContent = `模型 ${comparison.model_version_id} · ${comparison.rows.length} 个成功任务`;
   const table = el("table", "comparison-table");
   const head = el("thead");
   const headRow = el("tr");
@@ -880,10 +1032,6 @@ function renderMaintenance() {
     const node = $(`#cleanable-${category}`);
     if (node) node.textContent = `${summary.candidate_count} 项 · ${formatBytes(summary.reclaimable_bytes)}`;
   });
-  const active = state.maintenance?.active_tasks?.total || 0;
-  $("#cleanup-note").textContent = active
-    ? `当前有 ${active} 个活动任务；所有任务结束后才允许清理`
-    : "当前没有活动任务；执行前仍会重新核对文件列表与一次性确认令牌";
   const backupList = $("#backup-list");
   backupList.replaceChildren();
   state.backups.forEach((backup) => {
@@ -1030,6 +1178,7 @@ function populateWizardModels() {
     select.add(option);
   }
   if ([...select.options].some((option) => option.value === selected && !option.disabled)) select.value = selected;
+  refreshCustomSelect(select);
 }
 
 function populateWizardCalibrations() {
@@ -1045,6 +1194,7 @@ function populateWizardCalibrations() {
     }
   }
   if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+  refreshCustomSelect(select);
 }
 
 function renderProfileCards() {
@@ -1082,6 +1232,8 @@ function selectProfile(profileId, resetInvalid = false) {
     $("#l2m-mode").value = "auto";
     toast("已按 S600 能力重置 Core 与 L2M");
   }
+  refreshCustomSelect($("#core-num"));
+  refreshCustomSelect($("#l2m-mode"));
   toggleL2mCustom();
   const locks = $("#profile-locks");
   locks.replaceChildren();
@@ -1100,6 +1252,7 @@ function syncRunnerMode() {
   const gpuOption = select.querySelector('option[value="gpu"]');
   gpuOption.disabled = !gpu.available;
   if (!gpu.available && select.value === "gpu") select.value = "cpu";
+  refreshCustomSelect(select);
 }
 
 const WIZARD_FIELDS = [
@@ -1130,10 +1283,7 @@ function saveWizardDraft() {
   }));
   try {
     localStorage.setItem(draftKey(), JSON.stringify({version: 2, saved_at: new Date().toISOString(), fields, additional_inputs: additionalInputs}));
-    $("#wizard-draft-status").textContent = `草稿已保存 · ${new Date().toLocaleTimeString("zh-CN", {hour: "2-digit", minute: "2-digit"})}`;
-  } catch (_error) {
-    $("#wizard-draft-status").textContent = "浏览器未允许保存草稿";
-  }
+  } catch (_error) { /* Browser storage can be unavailable in privacy modes. */ }
 }
 
 function loadWizardDraft() {
@@ -1143,7 +1293,6 @@ function loadWizardDraft() {
     WIZARD_FIELDS.forEach((id) => {
       if (draft.fields[id] !== undefined) $(`#${id}`).value = draft.fields[id];
     });
-    $("#wizard-draft-status").textContent = `已恢复 ${formatDate(draft.saved_at)} 的草稿`;
   }
   const readyModel = projectModels().find(({version}) => version.compatibility_status === "READY");
   if (!$("#wizard-model").value && readyModel) $("#wizard-model").value = readyModel.version.id;
@@ -1170,6 +1319,7 @@ function loadWizardDraft() {
   toggleCompileMode();
   toggleL2mCustom();
   syncRunnerMode();
+  refreshCustomSelects($("#wizard-dialog"));
 }
 
 function openWizard() {
@@ -1281,6 +1431,7 @@ function renderAdditionalInputs(inputs, draftInputs = null) {
     card.append(grid);
     root.append(card);
   });
+  initializeCustomSelects(root);
 }
 
 function updateWizardModel(overwrite = true, draftInputs = null) {
@@ -1326,6 +1477,7 @@ function updateWizardModel(overwrite = true, draftInputs = null) {
   }
   renderAdditionalInputs(inspection.inputs || [], draftInputs);
   populateWizardCalibrations();
+  refreshCustomSelects($("#input-config-list"));
   saveWizardDraft();
 }
 
@@ -1671,9 +1823,7 @@ function renderRunDetail() {
   const run = state.currentRun;
   if (!run?.attempts) return;
   const attempt = run.attempts[run.attempts.length - 1];
-  $("#run-kind").textContent = runKindLabel(run.kind);
   $("#run-title").textContent = `${run.profile_id} · ${run.id.slice(0, 8)}`;
-  $("#run-subtitle").textContent = `${run.id} · Attempt ${attempt.number} · 创建于 ${formatDate(run.created_at)}`;
   const status = $("#run-status"); status.className = `status-pill ${statusClass(run.status)}`; status.textContent = run.status;
   $("#cancel-run").classList.toggle("hidden", !ACTIVE_STATUSES.has(run.status));
   $("#retry-run").classList.toggle("hidden", !RETRYABLE_STATUSES.has(run.status));
@@ -1877,10 +2027,7 @@ function renderDevices() {
   $("#devices-ready").textContent = state.devices.filter((device) => device.status === "READY").length;
   const root = $("#device-list");
   root.replaceChildren();
-  if (!state.devices.length) {
-    root.append(el("div", "empty-state", "尚未添加开发板；凭据将保存在本机加密 Secret Store"));
-    return;
-  }
+  if (!state.devices.length) return;
   state.devices.forEach((device) => {
     const card = el("article", "device-card");
     const heading = el("div", "device-card-heading");
@@ -1990,6 +2137,9 @@ function populateBoardRunForm(preferredDeviceId = $("#board-device")?.value) {
   const coreOne = $("#board-core").querySelector('option[value="2"]');
   coreOne.disabled = !device || device.platform === "s100";
   if (coreOne.disabled && $("#board-core").value === "2") $("#board-core").value = "0";
+  refreshCustomSelect(deviceSelect);
+  refreshCustomSelect(conversionSelect);
+  refreshCustomSelect($("#board-core"));
 }
 
 function openBoardRunCreate(deviceId = null) {
@@ -2026,10 +2176,7 @@ function renderBoardRuns() {
   $("#board-runs-active").textContent = state.boardRuns.filter((run) => ACTIVE_STATUSES.has(run.status)).length;
   const list = $("#board-run-list");
   list.replaceChildren();
-  if (!state.boardRuns.length) {
-    list.append(el("div", "empty-state", "设备探测成功、且已有 HBM 后即可运行 model_info / infer / perf"));
-    return;
-  }
+  if (!state.boardRuns.length) return;
   state.boardRuns.forEach((run) => {
     const row = el("button", "run-row board-run-row");
     row.type = "button";
@@ -2067,7 +2214,6 @@ function boardMetricValue(key, value) {
 function renderBoardRunDetail(detail) {
   state.currentBoardRun = detail;
   $("#board-run-title").textContent = `${boardModeLabel(detail.mode)} · ${detail.id.slice(0, 8)}`;
-  $("#board-run-subtitle").textContent = `${detail.device?.name || "已删除设备"} · ${detail.device?.platform?.toUpperCase() || "—"} · ${detail.phase}`;
   const root = $("#board-run-detail");
   root.replaceChildren();
   const summary = el("div", "summary-cards");

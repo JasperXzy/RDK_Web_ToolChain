@@ -160,7 +160,22 @@
         <div class="run-summary-grid">
           <div><span>排队</span><strong id="runs-queued">0</strong></div><div><span>执行中</span><strong id="runs-active">0</strong></div><div><span>成功</span><strong id="runs-succeeded">0</strong></div><div><span>需处理</span><strong id="runs-attention">0</strong></div>
         </div>
-        <section class="panel"><div class="filter-bar"><label>状态<select id="run-filter"><option value="all">全部状态</option><option value="active">执行中</option><option value="SUCCEEDED">成功</option><option value="FAILED">失败</option><option value="CANCELLED">已取消</option><option value="INTERRUPTED">已中断</option></select></label><label>搜索<input id="run-search" type="search" placeholder="Run ID / 平台 / 项目"></label><label class="comparison-picker">选择 2–4 个成功转换<select id="comparison-runs" multiple size="3" aria-label="待比较任务"></select></label><button id="compare-runs" class="button secondary" type="button" disabled>比较任务</button></div><div id="all-run-list" class="run-list detailed"></div></section>
+        <section class="panel">
+          <div class="filter-bar">
+            <label>状态<select id="run-filter"><option value="all">全部状态</option><option value="active">执行中</option><option value="SUCCEEDED">成功</option><option value="FAILED">失败</option><option value="CANCELLED">已取消</option><option value="INTERRUPTED">已中断</option></select></label>
+            <label>搜索<input id="run-search" type="search" placeholder="Run ID / 平台 / 项目"></label>
+            <div class="field-control custom-select-field comparison-picker">
+              <label id="comparison-runs-label" for="comparison-runs-trigger">选择模型（2–4 项）</label>
+              <div class="custom-select custom-multiselect" data-custom-select data-max-selections="4">
+                <select id="comparison-runs" class="custom-select-native" multiple tabindex="-1" aria-hidden="true" aria-labelledby="comparison-runs-label"></select>
+                <button id="comparison-runs-trigger" class="custom-select-trigger multi-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="comparison-runs-listbox" aria-labelledby="comparison-runs-label comparison-runs-value"><span id="comparison-runs-value" class="custom-select-value">选择成功转换</span><span id="comparison-runs-count" class="custom-select-count" aria-hidden="true">0/4</span><span class="custom-select-chevron" aria-hidden="true"></span></button>
+                <div id="comparison-runs-listbox" class="custom-select-menu hidden" role="listbox" aria-multiselectable="true" aria-labelledby="comparison-runs-label"></div>
+              </div>
+            </div>
+            <button id="compare-runs" class="button secondary" type="button" disabled>比较任务</button>
+          </div>
+          <div id="all-run-list" class="run-list detailed"></div>
+        </section>
       </section>
 
       <section id="devices-view" class="hidden">
@@ -169,12 +184,12 @@
           <div><span>设备</span><strong id="devices-total">0</strong></div><div><span>可用</span><strong id="devices-ready">0</strong></div><div><span>板端运行</span><strong id="board-runs-total">0</strong></div><div><span>执行中</span><strong id="board-runs-active">0</strong></div>
         </div>
         <section class="panel">
-          <div class="panel-heading"><div><span class="step-label">设备</span><h2>受信任设备</h2></div><span class="hint">首次探测必须确认 SHA256 Host Key</span></div>
-          <div id="device-list" class="device-grid"><div class="empty-state">尚未添加开发板</div></div>
+          <div class="panel-heading"><h2>受信任设备</h2></div>
+          <div id="device-list" class="device-grid"></div>
         </section>
         <section class="panel activity-panel">
-          <div class="panel-heading"><div><span class="step-label">板端任务</span><h2>板端验证历史</h2></div><button id="open-board-run-dialog" class="button secondary" type="button">新建板端验证</button></div>
-          <div id="board-run-list" class="run-list"><div class="empty-state">设备探测成功、且已有 HBM 后即可运行 model_info / infer / perf</div></div>
+          <div class="panel-heading"><h2>板端验证历史</h2><button id="open-board-run-dialog" class="button secondary" type="button">新建板端验证</button></div>
+          <div id="board-run-list" class="run-list"></div>
         </section>
       </section>
 
@@ -183,18 +198,17 @@
         <div id="storage-roots" class="maintenance-metrics"><div class="empty-state">正在读取存储信息…</div></div>
         <div class="section-grid maintenance-grid">
           <section class="panel">
-            <div class="panel-heading"><div><span class="step-label">安全清理</span><h2>可回收空间</h2></div><span id="cleanup-total" class="hint">尚未预览</span></div>
+            <div class="panel-heading"><h2>可回收空间</h2><span id="cleanup-total" class="hint"></span></div>
             <form id="cleanup-form" class="maintenance-form">
               <label class="maintenance-check"><input type="checkbox" name="cleanup-category" value="stale_uploads"><span><strong>过期上传暂存</strong><small>仅清理超过 24 小时的未完成上传</small></span><code id="cleanable-stale_uploads">—</code></label>
               <label class="maintenance-check"><input type="checkbox" name="cleanup-category" value="generated_exports"><span><strong>生成的导出包</strong><small>任务复现包和项目导出包可按需重新生成</small></span><code id="cleanable-generated_exports">—</code></label>
               <label class="maintenance-check"><input type="checkbox" name="cleanup-category" value="orphan_run_directories"><span><strong>孤立任务目录</strong><small>仅限数据库中已不存在的 UUID 任务目录</small></span><code id="cleanable-orphan_run_directories">—</code></label>
               <label class="maintenance-check"><input type="checkbox" name="cleanup-category" value="cache"><span><strong>编译缓存</strong><small>不删除 HBM；后续转换会重新构建缓存</small></span><code id="cleanable-cache">—</code></label>
               <div class="split-actions"><button class="button ghost" type="submit">生成清理预览</button><button id="execute-cleanup" class="button danger" type="button" disabled>确认并清理</button></div>
-              <p id="cleanup-note" class="security-note">任何任务处于排队或运行状态时，清理操作都会被阻止</p>
             </form>
           </section>
           <section class="panel">
-            <div class="panel-heading"><div><span class="step-label">备份与恢复</span><h2>本地备份</h2></div><span class="hint">缓存不进入备份</span></div>
+            <div class="panel-heading"><h2>本地备份</h2></div>
             <form id="backup-form" class="maintenance-form">
               <label class="maintenance-check compact"><input id="backup-runs" type="checkbox" checked><span><strong>包含转换与板端任务</strong><small>保存日志、HBM 和板端产物</small></span></label>
               <label class="maintenance-check compact"><input id="backup-credentials" type="checkbox" checked><span><strong>包含加密凭据</strong><small>连同 master.key 保存；备份文件必须妥善保管</small></span></label>
@@ -202,7 +216,6 @@
             </form>
             <label class="button ghost backup-import-button" for="backup-import">上传并校验已有备份<input id="backup-import" type="file" accept=".zip"></label>
             <div id="backup-list" class="backup-list"><div class="empty-state">尚未读取备份</div></div>
-            <p class="security-note restore-note">恢复必须停服执行：先在此上传并通过校验，再运行 <code>./scripts/rdkwt.sh restore &lt;文件名&gt;</code>；命令会先创建恢复前安全备份</p>
           </section>
         </div>
       </section>
@@ -218,7 +231,7 @@
 
   <dialog id="project-edit-dialog" class="modal-dialog">
     <form id="project-edit-form" class="modal-shell" novalidate>
-      <header class="dialog-header"><div><span class="eyebrow">项目信息</span><h2>编辑项目</h2></div><button class="close-button" data-close="project-edit-dialog" type="button" aria-label="关闭">×</button></header>
+      <header class="dialog-header"><h2>编辑项目</h2><button class="close-button" data-close="project-edit-dialog" type="button" aria-label="关闭">×</button></header>
       <div class="project-form-body">
         <label>项目名称<input id="project-edit-name" maxlength="200" required></label>
         <label>备注<textarea id="project-edit-description" maxlength="4000" rows="5"></textarea></label>
@@ -230,7 +243,7 @@
 
   <dialog id="device-dialog" class="modal-dialog">
     <form id="device-form" class="modal-shell">
-      <header class="dialog-header"><div><span class="eyebrow">设备管理</span><h2>添加开发板</h2><p>Host Key 可先留空；首次探测只显示指纹，确认后才会建立信任</p></div><button class="close-button" data-close="device-dialog" type="button" aria-label="关闭">×</button></header>
+      <header class="dialog-header"><h2>添加开发板</h2><button class="close-button" data-close="device-dialog" type="button" aria-label="关闭">×</button></header>
       <div class="device-form-body">
         <div class="form-grid two"><label>设备名称<input id="device-name" maxlength="200" required placeholder="例如：实验室 S100"></label><label>平台<select id="device-platform"><option value="s100">RDK S100</option><option value="s600">RDK S600</option></select></label><label>主机 / IP<input id="device-host" maxlength="255" required placeholder="192.168.1.10"></label><label>SSH 端口<input id="device-port" type="number" min="1" max="65535" value="22" required></label><label>用户名<input id="device-user" maxlength="128" value="root" required></label><label>认证方式<select id="device-auth-type"><option value="password">密码</option><option value="private_key">私钥</option></select></label></div>
         <label id="device-password-field">密码<input id="device-password" type="password" autocomplete="new-password"></label>
@@ -245,7 +258,7 @@
 
   <dialog id="board-run-create-dialog" class="modal-dialog">
     <form id="board-run-form" class="modal-shell">
-      <header class="dialog-header"><div><span class="eyebrow">板端任务</span><h2>新建板端验证</h2><p>只允许上传已完成转换的 HBM，并调用白名单内的 hrt_model_exec 模式</p></div><button class="close-button" data-close="board-run-create-dialog" type="button" aria-label="关闭">×</button></header>
+      <header class="dialog-header"><h2>新建板端验证</h2><button class="close-button" data-close="board-run-create-dialog" type="button" aria-label="关闭">×</button></header>
       <div class="device-form-body">
         <div class="form-grid two"><label>开发板<select id="board-device" required></select></label><label>成功转换 / HBM<select id="board-conversion" required></select></label><label>运行模式<select id="board-mode"><option value="model_info">model_info</option><option value="infer">infer</option><option value="perf">perf</option></select></label><label id="board-core-field" class="hidden">BPU Core<select id="board-core"><option value="0">自动调度</option><option value="1">Core 0</option><option value="2">Core 1</option></select></label></div>
         <label id="board-input-field" class="hidden">推理输入<input id="board-input" type="file"></label>
@@ -258,12 +271,12 @@
   </dialog>
 
   <dialog id="board-run-dialog" class="modal-dialog board-run-dialog">
-    <div class="modal-shell"><header class="dialog-header"><div><span class="eyebrow">板端任务</span><h2 id="board-run-title">板端验证详情</h2><p id="board-run-subtitle"></p></div><button class="close-button" data-close="board-run-dialog" type="button" aria-label="关闭">×</button></header><div id="board-run-detail" class="board-run-detail"></div><footer class="dialog-footer"><button id="cancel-board-run" class="button danger hidden" type="button">取消任务</button><span class="dialog-spacer"></span><button class="button ghost" data-close="board-run-dialog" type="button">完成</button></footer></div>
+    <div class="modal-shell"><header class="dialog-header"><h2 id="board-run-title">板端验证详情</h2><button class="close-button" data-close="board-run-dialog" type="button" aria-label="关闭">×</button></header><div id="board-run-detail" class="board-run-detail"></div><footer class="dialog-footer"><button id="cancel-board-run" class="button danger hidden" type="button">取消任务</button><span class="dialog-spacer"></span><button class="button ghost" data-close="board-run-dialog" type="button">完成</button></footer></div>
   </dialog>
 
   <dialog id="wizard-dialog" class="sheet-dialog wizard-dialog">
     <div class="dialog-shell">
-      <header class="dialog-header"><div><h2>转换向导</h2><p id="wizard-draft-status">草稿自动保存在当前浏览器</p></div><button class="close-button" data-close="wizard-dialog" type="button" aria-label="关闭">×</button></header>
+      <header class="dialog-header"><h2>转换向导</h2><button class="close-button" data-close="wizard-dialog" type="button" aria-label="关闭">×</button></header>
       <ol id="wizard-steps" class="wizard-steps">
         <li class="active" data-step="1"><b>1</b><span>模型</span></li><li data-step="2"><b>2</b><span>目标平台</span></li><li data-step="3"><b>3</b><span>输入配置</span></li><li data-step="4"><b>4</b><span>校准与预处理</span></li><li data-step="5"><b>5</b><span>编译</span></li><li data-step="6"><b>6</b><span>预览提交</span></li>
       </ol>
@@ -311,12 +324,12 @@
   </dialog>
 
   <dialog id="comparison-dialog" class="modal-dialog comparison-dialog">
-    <div class="modal-shell"><header class="dialog-header"><div><span class="eyebrow">指标对比</span><h2>任务对比</h2><p id="comparison-subtitle">同一模型的结构化指标</p></div><button class="close-button" data-close="comparison-dialog" type="button" aria-label="关闭">×</button></header><div id="comparison-result" class="comparison-result"></div><footer class="dialog-footer"><span class="dialog-spacer"></span><button class="button ghost" data-close="comparison-dialog" type="button">完成</button></footer></div>
+    <div class="modal-shell"><header class="dialog-header"><h2>任务对比</h2><button class="close-button" data-close="comparison-dialog" type="button" aria-label="关闭">×</button></header><div id="comparison-result" class="comparison-result"></div><footer class="dialog-footer"><span class="dialog-spacer"></span><button class="button ghost" data-close="comparison-dialog" type="button">完成</button></footer></div>
   </dialog>
 
   <dialog id="run-dialog" class="sheet-dialog run-dialog">
     <div class="dialog-shell">
-      <header class="dialog-header run-header"><div><span id="run-kind" class="eyebrow">模型转换</span><h2 id="run-title">任务详情</h2><p id="run-subtitle"></p></div><div class="run-actions"><span id="run-status" class="status-pill neutral" aria-live="polite">—</span><button id="cancel-run" class="button danger hidden" type="button">取消</button><button id="retry-run" class="button secondary hidden" type="button">按快照重试</button><a id="export-run" class="button primary hidden" href="#">导出完整包</a><button class="close-button" data-close="run-dialog" type="button" aria-label="关闭">×</button></div></header>
+      <header class="dialog-header run-header"><h2 id="run-title">任务详情</h2><div class="run-actions"><span id="run-status" class="status-pill neutral" aria-live="polite">—</span><button id="cancel-run" class="button danger hidden" type="button">取消</button><button id="retry-run" class="button secondary hidden" type="button">按快照重试</button><a id="export-run" class="button primary hidden" href="#">导出完整包</a><button class="close-button" data-close="run-dialog" type="button" aria-label="关闭">×</button></div></header>
       <div id="run-stepper" class="run-stepper"></div>
       <nav class="tabbar" aria-label="任务详情标签" role="tablist"><button id="run-overview-trigger" class="active" data-run-tab="overview" type="button" role="tab" aria-controls="run-overview-tab" aria-selected="true">概览</button><button id="run-logs-trigger" data-run-tab="logs" type="button" role="tab" aria-controls="run-logs-tab" aria-selected="false" tabindex="-1">实时日志</button><button id="run-config-trigger" data-run-tab="config" type="button" role="tab" aria-controls="run-config-tab" aria-selected="false" tabindex="-1">配置快照</button><button id="run-artifacts-trigger" data-run-tab="artifacts" type="button" role="tab" aria-controls="run-artifacts-tab" aria-selected="false" tabindex="-1">产物</button></nav>
       <div class="run-body">
@@ -329,7 +342,7 @@
   </dialog>
 
   <dialog id="preflight-dialog" class="modal-dialog">
-    <div class="modal-shell"><header class="dialog-header"><div><span class="eyebrow">系统检查</span><h2>本地环境预检</h2><p>不会静默拉取镜像，也不会向外部发送模型数据</p></div><button class="close-button" data-close="preflight-dialog" type="button" aria-label="关闭">×</button></header><div id="preflight-details" class="preflight-details"></div><footer class="dialog-footer"><button id="rerun-smoke" class="button secondary" type="button">运行 Runner Smoke Test</button><span class="dialog-spacer"></span><button class="button ghost" data-close="preflight-dialog" type="button">完成</button></footer></div>
+    <div class="modal-shell"><header class="dialog-header"><h2>本地环境预检</h2><button class="close-button" data-close="preflight-dialog" type="button" aria-label="关闭">×</button></header><div id="preflight-details" class="preflight-details"></div><footer class="dialog-footer"><button id="rerun-smoke" class="button secondary" type="button">运行 Runner Smoke Test</button><span class="dialog-spacer"></span><button class="button ghost" data-close="preflight-dialog" type="button">完成</button></footer></div>
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
