@@ -258,6 +258,7 @@ def test_run_rows_do_not_repeat_terminal_status_as_stage() -> None:
 
 
 def test_run_detail_uses_fixed_scroll_panes_and_wraps_long_metrics() -> None:
+    assert "不等同于完整业务数据集精度" not in JAVASCRIPT
     assert '<label class="log-search" for="log-search"><span>搜索</span><input id="log-search"' in HTML
     assert '$(".run-body").classList.toggle("fixed-pane-active", ["logs", "config"].includes(tab))' in JAVASCRIPT
     assert ".run-body.fixed-pane-active { display: flex; flex-direction: column; overflow: hidden; }" in CSS

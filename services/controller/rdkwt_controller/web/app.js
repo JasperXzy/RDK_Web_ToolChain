@@ -1906,7 +1906,6 @@ function renderRunOverview(run, attempt) {
     keyValue("HBRuntime 推理耗时", verification.hbruntime ? formatDuration(verification.hbruntime.duration_ms) : "—"),
     keyValue("警告 / 建议产物", `${summary.warning_count || 0} / ${summary.advice_artifact_count || 0}`),
   );
-  metrics.append(el("p", "cosine-note", "HBRuntime 与 hb_verifier 是真实数值冒烟和模型阶段回归验证，但仍不等同于完整业务数据集精度"));
   grid.append(execution, metrics); root.append(grid);
   if (run.kind === "MODEL_INSPECTION" && attempt.result?.metrics?.inspect) {
     const inspection = attempt.result.metrics.inspect;
